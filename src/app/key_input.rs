@@ -70,6 +70,7 @@ pub(super) fn wire_key_input(
                     op,
                     typed.as_str(),
                 );
+                let lines = result.text.split('\n').count() as i32;
                 CommandEditResult {
                     text: result.text.into(),
                     caret: result.caret as i32,
@@ -77,6 +78,42 @@ pub(super) fn wire_key_input(
                     anchor_line: result.anchor_line,
                     column: result.column,
                     column_end: result.column_end,
+                    lines: lines,
+                }
+            },
+        );
+    }
+    // The command editor's rectangle mode needs the real modifier and button
+    // state: Slint's own modifier state only refreshes on key events that
+    // carry text, and the winit backend drops bare Shift/Alt presses, so
+    // holding the chord and dragging straight away would read a stale value.
+    // Polling also lets the editor keep its mouse layer disabled until a
+    // rectangle is actually being made, which is what gives ordinary clicks
+    // the text input's exact hit testing.
+    {
+        let last_down = std::rc::Rc::new(std::cell::Cell::new(false));
+        window.on_command_poll_input(move || {
+            let down = crate::app::window::primary_button_down();
+            let edge = down && !last_down.replace(down);
+            let armed = crate::app::window::modifier_armed();
+            EditorInputState {
+                supported: crate::app::window::command_input_polling_supported(),
+                rect_armed: armed,
+                button_down: down,
+                plain_click: edge && !armed,
+            }
+        });
+    }
+    // Rectangle copy: the editor names the character columns, Rust cuts them
+    // out and hands them to the clipboard (same select-to-copy feel as the
+    // terminal view).
+    {
+        window.on_command_copy_block(
+            move |text: SharedString, top: i32, bottom: i32, start: i32, end: i32| {
+                let out =
+                    crate::terminal::command_edit::extract_rect(&text, top, bottom, start, end);
+                if !out.is_empty() {
+                    std::thread::spawn(move || clipboard_set_text(out));
                 }
             },
         );

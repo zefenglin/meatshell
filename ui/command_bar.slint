@@ -13,6 +13,19 @@ export struct CommandEditResult {
     anchor-line: int,    // 0-based fixed end of the block, -1 = column mode off
     column: int,         // 0-based character column where the block starts
     column-end: int,     // 0-based character column just past the block
+    lines: int,          // number of lines in text
+}
+
+// Right-now mouse and modifier state, polled from Rust (see poll-input).
+// Slint's own modifier state only refreshes on key events that carry text, so
+// a bare Shift+Alt press never reaches the UI; `supported` is false on
+// platforms without an OS query, where the editor falls back to the modifier
+// state of the last key event.
+export struct EditorInputState {
+    supported: bool,
+    rect-armed: bool,    // Shift and Alt are held right now
+    button-down: bool,   // the primary mouse button is held right now
+    plain-click: bool,   // the button just went down without Shift+Alt
 }
 
 // The large command editor that lives in the file-transfer panel's Command
@@ -50,6 +63,16 @@ export component CommandEditor inherits Rectangle {
     // Shift and Alt held: a plain drag selects text the way the widget does.
     property <bool> mod-shift: false;
     property <bool> mod-alt: false;
+    // Rectangle mode as polled from the OS: -1 = no polling on this platform
+    // (the layer stays enabled and the key-event modifiers decide), 0 = not
+    // armed, 1 = Shift+Alt held. The mouse layer is only enabled while this is
+    // not 0 or while a rectangle drag is in progress, which is what lets an
+    // ordinary click reach the text input's exact hit testing.
+    property <int> rect-mode: 0;
+    property <bool> rect-dragging: false;
+    // Line count of the buffer as last reported by Rust; 0 means "not known
+    // yet", which is only true before the first query.
+    property <int> text-lines: 0;
     // Cell size of the editor font, measured off-screen below. Mouse pixels
     // become (line, column) through these two.
     property <length> cell-w: mono-ruler.preferred-width / 10;
@@ -59,6 +82,11 @@ export component CommandEditor inherits Rectangle {
     // (text, caret byte offset, anchor line, start column, end column, op,
     // typed text) -> new state. Negative columns mean "take it from the caret".
     callback step(string, int, int, int, int, int, string) -> CommandEditResult;
+    // Current modifier / mouse-button state, polled while the panel is open.
+    callback poll-input() -> EditorInputState;
+    // Cut one character rectangle out of text and put it on the clipboard.
+    callback copy-block(string, int /* top line */, int /* bottom line */,
+        int /* start column */, int /* end column */);
 
     function is-typed-text(e: KeyEvent) -> bool {
         return !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta
@@ -81,6 +109,7 @@ export component CommandEditor inherits Rectangle {
         root.column-anchor = result.anchor-line;
         root.column-caret-line = result.caret-line;
         root.column-index = result.column;
+        root.text-lines = max(1, result.lines);
         // A block stays alive after the edit: Rust collapses the rectangle onto
         // its caret column, and a zero-width block is what draws one caret per
         // line, so the next keystroke still reaches every line of the block.
@@ -99,6 +128,36 @@ export component CommandEditor inherits Rectangle {
         return abs(root.column-caret-line - root.column-anchor) + 1;
     }
 
+    function clear-block() {
+        root.column-anchor = -1;
+        root.sel-start-col = -1;
+        root.sel-end-col = -1;
+        root.click-line = -1;
+        root.click-col = -1;
+    }
+
+    // Copy the block as it stands. A zero-width block is a caret on every line
+    // and has nothing to copy.
+    function copy-rect() {
+        if (root.column-anchor >= 0 && root.sel-end-col > root.sel-start-col) {
+            root.copy-block(edit-input.text,
+                min(root.column-anchor, root.column-caret-line),
+                max(root.column-anchor, root.column-caret-line),
+                root.sel-start-col, root.sel-end-col);
+        }
+    }
+
+    // End a rectangle drag and copy it once. The pointer-up path and the polled
+    // button state both come here, so a lost release does not leave the block
+    // uncopied.
+    function finish-rect() {
+        if (!root.rect-dragging) {
+            return;
+        }
+        root.rect-dragging = false;
+        root.copy-rect();
+    }
+
     // --- Mouse -> (line, column) ------------------------------------------
     // Only a query: Rust answers with the byte offset of that spot and leaves
     // the text alone, which is what lets the mouse place the caret exactly.
@@ -107,21 +166,34 @@ export component CommandEditor inherits Rectangle {
             line, col, col, 11, "").caret;
     }
 
+    // Ask Rust where a (line, column) pair lives: the answer carries the
+    // clamped line, the current line count and the byte offset, so a click
+    // below the last line lands on the last line instead of past it.
+    function place(line: int, col: int) -> CommandEditResult {
+        return root.step(edit-input.text, edit-input.cursor-position-byte-offset,
+            line, col, col, 11, "");
+    }
+
     function line-at(y: length) -> int {
-        // y is relative to the visible viewport; add the scroll offset to get
-        // back into content, then subtract the text input's own origin.
-        return max(0, floor((y + ed-scroll.content-y - 8px) / root.line-h));
+        // y is relative to the visible viewport and content-y is the content's
+        // position relative to it (negative once scrolled down), so subtracting
+        // it goes back into content; 8px is the text input's own origin.
+        let line = max(0, floor((y - ed-scroll.content-y - 8px) / root.line-h));
+        return root.text-lines > 0 ? min(line, root.text-lines - 1) : line;
     }
 
     function col-at(x: length) -> int {
-        return max(0, round((x - 8px) / root.cell-w));
+        // Same for x: content-x is negative once scrolled to the right.
+        return max(0, floor((x - ed-scroll.content-x - 8px) / root.cell-w));
     }
 
     // Plain drag: drop the block and let the text input own the selection, so
     // dragging across lines is an ordinary character selection.
     function begin-caret(x: length, y: length) {
         edit-input.focus();
-        root.drag-line = root.line-at(y);
+        let spot = root.place(root.line-at(y), root.col-at(x));
+        root.text-lines = max(1, spot.lines);
+        root.drag-line = spot.caret-line;
         root.drag-col = root.col-at(x);
         root.click-line = root.drag-line;
         root.click-col = root.drag-col;
@@ -129,15 +201,14 @@ export component CommandEditor inherits Rectangle {
         root.column-index = root.drag-col;
         root.sel-start-col = -1;
         root.sel-end-col = -1;
-        let at = root.byte-at(root.drag-line, root.drag-col);
-        edit-input.set-selection-offsets(at, at);
+        edit-input.set-selection-offsets(spot.caret, spot.caret);
     }
 
     function extend-caret(x: length, y: length) {
-        let line = root.line-at(y);
-        let col = root.col-at(x);
+        let spot = root.place(root.line-at(y), root.col-at(x));
+        root.text-lines = max(1, spot.lines);
         edit-input.set-selection-offsets(
-            root.byte-at(root.drag-line, root.drag-col), root.byte-at(line, col));
+            root.byte-at(root.drag-line, root.drag-col), spot.caret);
     }
 
     // Shift+Alt drag: a character rectangle. A press without any horizontal
@@ -145,7 +216,9 @@ export component CommandEditor inherits Rectangle {
     // that column, which is how typing inserts before a character.
     function begin-rect(x: length, y: length) {
         edit-input.focus();
-        root.drag-line = root.line-at(y);
+        let spot = root.place(root.line-at(y), root.col-at(x));
+        root.text-lines = max(1, spot.lines);
+        root.drag-line = spot.caret-line;
         root.drag-col = root.col-at(x);
         root.click-line = root.drag-line;
         root.click-col = root.drag-col;
@@ -154,12 +227,16 @@ export component CommandEditor inherits Rectangle {
         root.column-anchor = root.drag-line;
         root.column-caret-line = root.drag-line;
         root.column-index = root.drag-col;
-        let at = root.byte-at(root.drag-line, root.drag-col);
-        edit-input.set-selection-offsets(at, at);
+        edit-input.set-selection-offsets(spot.caret, spot.caret);
     }
 
+    // Move the moving corner of the block: the corner pressed first
+    // (click-line/click-col) stays put, so a rectangle can be grown again with
+    // another Shift+Alt press instead of starting over from a new point.
     function extend-rect(x: length, y: length) {
-        let line = root.line-at(y);
+        let spot = root.place(root.line-at(y), root.col-at(x));
+        root.text-lines = max(1, spot.lines);
+        let line = spot.caret-line;
         let col = root.col-at(x);
         if (col == root.click-col) {
             root.sel-start-col = root.click-col;
@@ -171,8 +248,7 @@ export component CommandEditor inherits Rectangle {
         root.column-anchor = root.click-line;
         root.column-caret-line = line;
         root.column-index = root.sel-start-col;
-        let at = root.byte-at(line, col);
-        edit-input.set-selection-offsets(at, at);
+        edit-input.set-selection-offsets(spot.caret, spot.caret);
     }
 
     background: Theme.bg-panel-alt;
@@ -388,9 +464,9 @@ export component CommandEditor inherits Rectangle {
                                     - (cursor-y - ed-scroll.visible-height + 12px));
                         }
                     }
-                    // Shift+Alt turns a drag into a rectangle; remember the
-                    // modifiers from the key events because the pointer event
-                    // carries none.
+                    // Remember the modifiers from the key events as well: they
+                    // are the fallback on platforms where the OS cannot be
+                    // polled (see poll-input above).
                     key-released(e) => {
                         root.mod-shift = e.modifiers.shift;
                         root.mod-alt = e.modifiers.alt;
@@ -404,12 +480,16 @@ export component CommandEditor inherits Rectangle {
                         // path and only touch the block's columns.
                         if (e.modifiers.control
                             && (e.text == "a" || e.text == "A")) {
-                            root.column-anchor = -1;
-                            root.sel-start-col = -1;
-                            root.sel-end-col = -1;
-                            root.click-line = -1;
-                            root.click-col = -1;
+                            root.clear-block();
                             edit-input.select-all();
+                            return accept;
+                        }
+                        // Ctrl+C copies the block itself: the text input's own
+                        // copy would only see the collapsed caret.
+                        if (e.modifiers.control
+                            && (e.text == "c" || e.text == "C")
+                            && root.column-anchor >= 0) {
+                            root.copy-rect();
                             return accept;
                         }
                         // Ctrl/Alt+Shift+Arrows build the column block: Down/Up
@@ -498,16 +578,18 @@ export component CommandEditor inherits Rectangle {
             }
 
             // --- Mouse layer ----------------------------------------------
-            // The text input maps pixels to bytes through the renderer; a
-            // rectangle needs characters, so the mouse is handled here and
-            // Rust says where each (line, column) lives. The 12px on the right
-            // leaves the scrollbar usable. Without Shift+Alt this layer behaves
-            // like the widget: click places the caret, drag selects characters.
+            // A rectangle needs character columns, so the mouse is handled here
+            // and Rust says where each (line, column) lives. The layer is only
+            // enabled while Shift+Alt is held or while a rectangle drag is in
+            // progress: an ordinary click then reaches the text input and uses
+            // its exact hit testing instead of an approximated grid. The 12px on
+            // the right keeps the scrollbar usable.
             drag-layer := TouchArea {
                 x: 0;
                 y: 0;
                 width: max(1px, ed-scroll.visible-width - 12px);
                 height: ed-scroll.visible-height;
+                enabled: root.rect-mode != 0 || root.rect-dragging;
                 mouse-cursor: text;
                 scroll-event(event) => {
                     ed-scroll.content-y = clamp(
@@ -519,13 +601,14 @@ export component CommandEditor inherits Rectangle {
                 pointer-event(event) => {
                     if (event.button == PointerEventButton.left
                         && event.kind == PointerEventKind.down) {
-                        if (root.mod-shift && root.mod-alt) {
-                            // A plain click that already placed the caret is
-                            // the first corner: pressing Shift+Alt elsewhere
-                            // finishes the rectangle from it.
-                            if (root.column-anchor < 0 && root.click-line >= 0
-                                && (root.drag-line != root.line-at(self.mouse-y)
-                                    || root.drag-col != root.col-at(self.mouse-x))) {
+                        if (root.rect-mode > 0
+                            || (root.rect-mode < 0 && root.mod-shift && root.mod-alt)) {
+                            root.rect-dragging = true;
+                            if (root.column-anchor >= 0
+                                && root.sel-end-col > root.sel-start-col) {
+                                // A block is already there: keep its far
+                                // corner and move the near one, so growing or
+                                // shrinking it does not need the start again.
                                 root.extend-rect(self.mouse-x, self.mouse-y);
                             } else {
                                 root.begin-rect(self.mouse-x, self.mouse-y);
@@ -533,21 +616,39 @@ export component CommandEditor inherits Rectangle {
                         } else {
                             root.begin-caret(self.mouse-x, self.mouse-y);
                         }
+                    } else if (event.button == PointerEventButton.left
+                        && event.kind == PointerEventKind.up) {
+                        root.finish-rect();
                     }
                 }
                 moved => {
                     if (self.pressed) {
-                        if (root.column-anchor >= 0) {
+                        if (root.rect-dragging) {
                             root.extend-rect(self.mouse-x, self.mouse-y);
                         } else {
                             root.extend-caret(self.mouse-x, self.mouse-y);
                         }
-                    } else if (root.mod-shift && root.mod-alt && root.click-line >= 0) {
-                        // Two-step rectangle: click placed one corner, moving
-                        // the pointer with Shift+Alt held drags the other one.
-                        root.extend-rect(self.mouse-x, self.mouse-y);
                     }
                 }
+            }
+        }
+    }
+
+    // Slint drops bare modifier presses before they reach the UI (the winit
+    // backend ignores key events without text), so rectangle mode is polled
+    // from the OS instead: 40ms is faster than a press, and the mouse layer
+    // stays disabled while Shift+Alt is not held.
+    Timer {
+        interval: 40ms;
+        running: root.active;
+        triggered => {
+            let state = root.poll-input();
+            root.rect-mode = !state.supported ? -1 : (state.rect-armed ? 1 : 0);
+            if (state.supported && !state.button-down) {
+                root.finish-rect();
+            }
+            if (state.plain-click && root.column-anchor >= 0) {
+                root.clear-block();
             }
         }
     }

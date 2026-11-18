@@ -2,7 +2,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { SftpPanel, SftpEntry, SftpTreeNode, SftpLocalPlace, TunnelInfo, SftpPathSuggestion } from "sftp_panel.slint";
 import { TabInfo } from "tabs.slint";
-import { CommandEditResult } from "command_bar.slint";
+import { CommandEditResult, EditorInputState } from "command_bar.slint";
 
 // Embed the terminal fonts here too so the cell-probe Text below measures
 // with the CORRECT font (the built-in Meatshell Mono), not a system fallback.
@@ -381,6 +381,10 @@ export component TerminalView inherits Rectangle {
     // Multi-line command editor (panel's Command tab). The editor keeps its own
     // draft; Rust only answers edit steps; sending reuses print-command.
     callback command-step(string, int, int, int, int, int, string) -> CommandEditResult;
+    // Right-now modifier / mouse state for the editor's rectangle mode, and
+    // the block copy. Both are forwarded straight through to the panel.
+    callback command-poll-input() -> EditorInputState;
+    callback command-copy-block(string, int, int, int, int);
 
     // --- SFTP docking (within the terminal area) ---------------------------
     // Which edge of the terminal area the SFTP panel sits on: left|right|top|bottom.
@@ -2538,6 +2542,10 @@ export component TerminalView inherits Rectangle {
                 return root.command-step(text, caret, anchor, start, end, op, typed);
             }
             command-send(text, all) => { root.run-command(text, all); }
+            command-poll-input() => { return root.command-poll-input(); }
+            command-copy-block(text, top, bottom, start, end) => {
+                root.command-copy-block(text, top, bottom, start, end);
+            }
             current-tab-id: root.tab-id;
             current-path:  root.sftp-path;
             entries:       root.sftp-entries;

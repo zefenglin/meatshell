@@ -329,6 +329,53 @@ fn apply_rect_op(
     }
 }
 
+/// Cut one character rectangle out of `text` and return it as clipboard text.
+/// `top_line`/`bottom_line` and `start_col`/`end_col` are the corners in either
+/// order. Lines outside the text are ignored and a line that ends before
+/// `end_col` contributes only what it has, so no padding spaces are invented.
+pub fn extract_rect(
+    text: &str,
+    top_line: i32,
+    bottom_line: i32,
+    start_col: i32,
+    end_col: i32,
+) -> String {
+    // Same normalization as `apply_rect`: a pasted value can carry CR.
+    let normalized: String;
+    let text = if text.contains('\r') {
+        normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        normalized.as_str()
+    } else {
+        text
+    };
+    let lines = split_lines(text);
+    let last = lines.len() as i32 - 1;
+    let (top, bottom) = if top_line <= bottom_line {
+        (top_line, bottom_line)
+    } else {
+        (bottom_line, top_line)
+    };
+    let (first_col, last_col) = if start_col <= end_col {
+        (start_col, end_col)
+    } else {
+        (end_col, start_col)
+    };
+    let top = top.clamp(0, last) as usize;
+    let bottom = bottom.clamp(0, last) as usize;
+    let start = first_col.max(0) as usize;
+    let end = last_col.max(0) as usize;
+    let mut out = String::new();
+    for (index, line) in lines[top..=bottom].iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let from = start.min(line.len());
+        let to = end.min(line.len()).max(from);
+        out.extend(&line[from..to]);
+    }
+    out
+}
+
 /// Apply `op` to `text`. `caret` is a byte offset, `anchor_line` the fixed end
 /// of the column block (`NO_ANCHOR` when column mode is off) and `insert` the
 /// typed text for `OP_INSERT`. The column comes from the caret: this is the
@@ -800,6 +847,35 @@ mod tests {
         let right = apply_rect(text, caret, 0, 1, 4, OP_MOVE_RIGHT, "");
         assert_eq!(right.column, 4);
         assert_eq!(right.text, text);
+    }
+
+    #[test]
+    fn extract_rect_takes_character_columns() {
+        let text = "abcdef\nghijkl\nmnopqr";
+        assert_eq!(extract_rect(text, 0, 2, 1, 4), "bcd\nhij\nnop");
+        // The corners arrive in either order.
+        assert_eq!(extract_rect(text, 2, 0, 4, 1), "bcd\nhij\nnop");
+        assert_eq!(extract_rect(text, 1, 1, 2, 99), "ijkl");
+    }
+
+    #[test]
+    fn extract_rect_truncates_short_lines_without_padding() {
+        let text = "abcdef\nab\nabcdef";
+        assert_eq!(extract_rect(text, 0, 2, 2, 5), "cde\n\ncde");
+        assert_eq!(extract_rect(text, 1, 1, 3, 5), "");
+    }
+
+    #[test]
+    fn extract_rect_ignores_lines_outside_the_text() {
+        let text = "one\ntwo";
+        assert_eq!(extract_rect(text, -5, 90, 0, 3), "one\ntwo");
+        assert_eq!(extract_rect("", 0, 3, 0, 3), "");
+    }
+
+    #[test]
+    fn extract_rect_normalizes_crlf() {
+        let text = "abcdef\r\nghijkl";
+        assert_eq!(extract_rect(text, 0, 1, 2, 4), "cd\nij");
     }
 }
 

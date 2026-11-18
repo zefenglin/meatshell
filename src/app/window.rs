@@ -284,6 +284,35 @@ pub(super) fn primary_button_down() -> bool {
     false
 }
 
+/// Whether Shift and Alt are both held right now. Slint's modifier state only
+/// refreshes on key events that carry text and the winit backend drops bare
+/// modifier presses, so the editor asks the OS instead of the last key event.
+#[cfg(windows)]
+pub(super) fn modifier_armed() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(key: i32) -> i16;
+    }
+    const VK_SHIFT: i32 = 0x10;
+    const VK_MENU: i32 = 0x12;
+    unsafe {
+        (GetAsyncKeyState(VK_SHIFT) as u16 & 0x8000) != 0
+            && (GetAsyncKeyState(VK_MENU) as u16 & 0x8000) != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub(super) fn modifier_armed() -> bool {
+    false
+}
+
+/// Whether the command editor can poll the real modifier state. When it
+/// cannot, the UI keeps its mouse layer on and falls back to the modifier
+/// state of the last key event.
+pub(super) fn command_input_polling_supported() -> bool {
+    cfg!(windows)
+}
+
 /// Whether the OS currently considers the window maximized (IsZoomed).
 /// Authoritative on purpose: winit's cached flag can lag behind the OS during
 /// the maximize-to-restore drag, and re-aligning a maximized window breaks its

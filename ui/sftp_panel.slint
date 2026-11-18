@@ -1,7 +1,7 @@
 import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 import { TabInfo } from "tabs.slint";
-import { CommandEditor, CommandEditResult } from "command_bar.slint";
+import { CommandEditor, CommandEditResult, EditorInputState } from "command_bar.slint";
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -1493,6 +1493,11 @@ export component SftpPanel inherits Rectangle {
         int /* start column */, int /* end column */, int /* op */,
         string /* typed */) -> CommandEditResult;
     callback command-send(string /* text */, bool /* to all sessions */);
+    // Current modifier / mouse state for the command editor's rectangle mode.
+    callback command-poll-input() -> EditorInputState;
+    // Copy one character rectangle of the command draft to the clipboard.
+    callback command-copy-block(string /* text */, int /* top line */,
+        int /* bottom line */, int /* start column */, int /* end column */);
     // Context-menu extensions (#69). The *-request callbacks open dialogs in
     // the app shell; copy-path goes straight to the system clipboard.
     callback rename-request(string /* path */, string /* current name */);
@@ -3510,6 +3515,10 @@ export component SftpPanel inherits Rectangle {
                 return root.command-step(text, caret, anchor, start, end, op, typed);
             }
             send(text, all) => { root.command-send(text, all); }
+            poll-input() => { return root.command-poll-input(); }
+            copy-block(text, top, bottom, start, end) => {
+                root.command-copy-block(text, top, bottom, start, end);
+            }
         }
 
     }

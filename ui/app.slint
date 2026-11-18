@@ -23,7 +23,7 @@ import { ConfirmDialog } from "confirm_dialog.slint";
 import { ModalLayer, ModalKind } from "modal.slint";
 import { LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, RailButton, ToolStrip } from "widgets.slint";
 import { TerminalView, TermSpan, TermMatch, FindStatus, QuickCmd, QuickDockPanel } from "terminal_view.slint";
-import { CommandEditResult } from "command_bar.slint";
+import { CommandEditResult, EditorInputState } from "command_bar.slint";
 import { SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
 import { TerminalView, TermSpan, TermMatch, QuickCmd, QuickDockPanel } from "terminal_view.slint";
 import { SftpEntry, SftpTreeNode, SftpLocalPlace, TunnelInfo, SftpPathSuggestion, SftpPathSuggestions } from "sftp_panel.slint";
@@ -693,6 +693,11 @@ export component AppWindow inherits Window {
     callback command-edit-step(string /* text */, int /* caret */, int /* anchor line */,
         int /* start column */, int /* end column */, int /* op */,
         string /* typed */) -> CommandEditResult;
+    // Right-now modifier / mouse state for the command editor's rectangle mode.
+    callback command-poll-input() -> EditorInputState;
+    // Copy one character rectangle of the command draft to the clipboard.
+    callback command-copy-block(string /* text */, int /* top line */,
+        int /* bottom line */, int /* start column */, int /* end column */);
     callback copy-text(string);                 // copy a history command (#96)
     callback delete-history(int /* index */);   // remove a history entry (#96)
     callback delete-history-cmd(string /* cmd */);   // remove a history entry by command (#101)
@@ -2557,6 +2562,10 @@ export component AppWindow inherits Window {
                         run-command(cmd, all) => { root.run-command(term.id, cmd, all); }
                         command-step(text, caret, anchor, start, end, op, typed) => {
                             return root.command-edit-step(text, caret, anchor, start, end, op, typed);
+                        }
+                        command-poll-input() => { return root.command-poll-input(); }
+                        command-copy-block(text, top, bottom, start, end) => {
+                            root.command-copy-block(text, top, bottom, start, end);
                         }
                         copy-text(t) => { root.copy-text(t); }
                         delete-history(i) => { root.delete-history(i); }

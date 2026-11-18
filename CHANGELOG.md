@@ -5,6 +5,10 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-11-18
+
+- **命令输入框：点击定位、矩形选择与复制。** 四个问题一起修好了。① 以前那个覆盖在文本框上的鼠标层一直拦着左键，光标位置是按"单元格宽高"估算出来的，滚动之后还会算错（竖直偏移的符号写反了，横向滚动完全没算），所以点哪光标经常不在哪；现在这层只在按住 Shift+Alt 或正在拖矩形时才启用，普通点击直接交给文本框自己按字形做精确命中。② 矩形选择改用与绘制完全一致的换算（含横向滚动）、按字符列向下取整，拖到文本以外也不会再把块拉长到不存在的位置。③ 拖完矩形松手即复制（和终端一样），Ctrl+C 也能复制；短行按行尾截断，不补空格。④ 已经有矩形时再按 Shift+Alt 拖动，固定角保持不动、只移动活动角，因此可以反复扩大或缩小，不必重新点起点。另外：Alt/Shift 的按下状态改为直接向系统查询（原来只在带文字的按键事件里更新，单独按修饰键时状态是旧的）。
+- **Command editor: clicks land on the caret, blocks are accurate, copy and extend work.** Four fixes. ① The mouse layer that sat on top of the text input always captured the left button and derived the caret from an approximated cell grid — which was also wrong once scrolled (the vertical offset had the wrong sign and horizontal scrolling was ignored), so clicking often put the caret somewhere else. The layer is now enabled only while Shift+Alt is held or a block is being dragged, so an ordinary click goes to the text input and uses its exact, glyph-aware hit testing. ② Block corners now use the same mapping as the drawn highlight (horizontal scrolling included) and floor to the character column, and dragging past the text no longer stretches the block onto lines that do not exist. ③ Releasing the drag copies the block, exactly like the terminal, and Ctrl+C copies it too; short lines are cut at their end rather than padded with spaces. ④ With a block already there, another Shift+Alt drag keeps the fixed corner and moves the moving one, so the block can be grown or shrunk repeatedly without pressing the start again. Modifier state is also queried from the OS now: it used to update only on key events that carry text, so a bare Shift+Alt press left it stale.
 ## [0.8.12] - 2026-11-18
 
 - **行距变大后，终端文字不再顶在格子上头，光标也保持字高。** 行距原来只把单元格拉高，文字仍贴着格子顶部画，多出来的空当全压在字下面，看起来像没有居中；方块光标的高度也跟着单元格一起被拉长，1.5 倍行距下光标比字高一半。现在多出来的空间上下均分，文字在行内垂直居中；光标（方块与下划线）按字高绘制并跟着文字一起居中，下划线同样贴回字底；行距 100 % 时一切与原来完全一致。
