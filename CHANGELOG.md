@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-11-18
+
+- **双击标题栏无法最大化（0.8.9 的回归）。** 0.8.9 把指针抓取的清理逻辑从 Linux 推广到了所有平台：拖动结束后补发一次"释放 + 移出"事件。但这次补发的释放位置在窗口外，它不会产生点击，却会清掉按下状态和连击计数，紧接着的真实点击就被吃掉了 —— 双击自然也就消失了。现在这段逻辑重新只在 Linux 生效（在那边系统确实会吞掉松开事件）。
+- **Double-clicking the title bar no longer maximized (regression in 0.8.9).** 0.8.9 promoted the pointer-grab cleanup from Linux to every platform, sending a synthetic release plus exit after a drag. That release lands outside the window: it emits no click but does clear the pressed state and the click counter, so the real click right after it is swallowed — and the double click with it. The cleanup is Linux-only again, where the OS really does drop the release.
+
 ## [0.8.9] - 2026-11-18
 
 - **拖动还原后窗口卡在屏幕顶端、再也拖不动。** 两处都修好了：还原位置现在会被限制在当前显示器的工作区内，标题栏一定留在屏幕上（拖动起点靠近屏幕顶端时，按比例算出的位置会把标题栏推到屏幕外面，于是抓不到）；更重要的是进入系统移动循环前会先确认左键确实还按着 —— 那个循环靠"松开"事件退出，在按键已经松开之后才进入，循环就再也等不到退出事件，UI 线程会永久卡在里面，此后窗口不响应任何点击，重新最大化/还原也没用。另外指针抓取清理不再只作用于 Linux：系统吞掉松开事件后，应用会一直以为鼠标还按着，现在同样会补发释放。

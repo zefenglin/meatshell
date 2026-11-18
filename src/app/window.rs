@@ -1421,16 +1421,20 @@ pub(super) fn set_term_fullscreen(win: &AppWindow, on: bool) {
 #[path = "../../tests/app/term_fullscreen/mod.rs"]
 mod term_fullscreen_tests;
 
+#[cfg(target_os = "linux")]
 pub(super) fn schedule_slint_pointer_ungrab<T>(weak: slint::Weak<T>)
 where
     T: slint::ComponentHandle + 'static,
 {
-    // The OS move/resize loop may consume the release event: Linux window
-    // managers/compositors do it routinely (Cinnamon/Mutter/KWin), and the
-    // Windows move loop does when it ends early. If Slint keeps its press grab,
-    // the whole app stays stuck in move/resize mode — no item ever sees the
-    // button go up, so the next press is ignored and the window can no longer be
-    // dragged. A few deferred synthetic releases cover the timing differences.
+    // Linux window managers/compositors may consume the release event after a
+    // system move/resize starts. If Slint keeps its press grab, the whole app
+    // can remain stuck in move/resize cursor mode. A few deferred synthetic
+    // releases cover Cinnamon/Mutter/KWin timing differences.
+    //
+    // Deliberately Linux-only: on Windows the release does reach Slint, and a
+    // synthetic one lands outside the pressed item (so it emits no click) while
+    // still clearing `pressed` and the click counter — which kills the click
+    // that follows and with it double-click-to-maximize.
     for delay_ms in [0_u64, 16, 80, 200] {
         let weak2 = weak.clone();
         slint::Timer::single_shot(std::time::Duration::from_millis(delay_ms), move || {
@@ -1444,6 +1448,13 @@ where
             }
         });
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn schedule_slint_pointer_ungrab<T>(_weak: slint::Weak<T>)
+where
+    T: slint::ComponentHandle + 'static,
+{
 }
 
 /// macOS-only: install a custom winit backend that makes the native title bar
