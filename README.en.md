@@ -366,17 +366,6 @@ verifies `meatshell --version`, commits `Release v0.6.0`, creates an annotated
 tag, and pushes the current branch plus the tag. See
 [docs/release.md](docs/release.md) for details.
 
-## Related Groups
-
-<p align="center">
-  <img src="docs/QR/QQ_Group_QR_Code.jpg" alt="QQ group QR code" width="300"><br>
-  <em>Scan the QR code to join QQ groups to exchange user experiences, provide feedback, or get the latest updates</em>
-</p>
-
-## Friendly Links
-
-- [XenTerm](https://github.com/ixbaicn/XenTerm) (A new derivative fork, progressing together)
-
 ## License
 
 Dual-licensed under MIT OR Apache-2.0.
