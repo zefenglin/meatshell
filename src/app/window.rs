@@ -136,6 +136,7 @@ pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> 
             region: *const std::ffi::c_void,
             flags: u32,
         ) -> i32;
+        fn IsZoomed(hwnd: isize) -> i32;
     }
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
@@ -155,6 +156,11 @@ pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> 
         };
         let hwnd = h.hwnd.get();
         unsafe {
+            // A maximized frameless window legitimately keeps the frame inset,
+            // and re-setting its frame there breaks the maximized layout.
+            if IsZoomed(hwnd) != 0 {
+                return None;
+            }
             let mut outer = WinRect::default();
             let mut client = WinRect::default();
             let mut origin = WinPoint::default();
@@ -211,12 +217,33 @@ pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> 
     let Some(Some((hwnd, logical, dx, dy))) = measured else {
         return false;
     };
-    tracing::debug!(
+    // DWM clips the presented frame to the "extended frame bounds"; when that
+    // still carries the maximized inset, the border area stays transparent.
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(hwnd: isize, attr: u32, pv: isize, cb: u32) -> i32;
+    }
+    const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+    let mut dwm_bounds = [0i32; 4];
+    let dwm_hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            dwm_bounds.as_mut_ptr() as isize,
+            16,
+        )
+    };
+    tracing::info!(
         target: "window_chrome",
         dx,
         dy,
         width = logical.width,
         height = logical.height,
+        dwm_hr,
+        dwm_l = dwm_bounds[0],
+        dwm_t = dwm_bounds[1],
+        dwm_r = dwm_bounds[2],
+        dwm_b = dwm_bounds[3],
         "realigned frameless surface after maximize/restore"
     );
     window.dispatch_event(slint::platform::WindowEvent::Resized { size: logical });
@@ -257,32 +284,90 @@ pub(super) fn primary_button_down() -> bool {
     false
 }
 
-/// Re-align after a drag restored a maximized window, but only once the drag is
-/// over. Dragging a maximized window restores it at the *start* of the drag and
-/// the move loop keeps pumping timers, so a re-align fired during the drag gets
-/// undone by the OS when the drag ends — the faster the drag, the more of the
-/// stale frame is left behind (unpainted strip along the top/left edge).
-pub(super) fn schedule_restore_realign(weak: slint::Weak<AppWindow>, attempt: u32) {
-    // ~7 s of drag at 120 ms per attempt; a drag cannot outlast that.
-    if attempt > 60 {
+/// Whether the OS currently considers the window maximized (IsZoomed).
+/// Authoritative on purpose: winit's cached flag can lag behind the OS during
+/// the maximize-to-restore drag, and re-aligning a maximized window breaks its
+/// layout.
+#[cfg(windows)]
+pub(super) fn is_window_zoomed(window: &slint::Window) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[link(name = "user32")]
+    extern "system" {
+        fn IsZoomed(hwnd: isize) -> i32;
+    }
+    window.with_winit_window(|ww| {
+        let Ok(handle) = ww.window_handle() else {
+            return false;
+        };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return false;
+        };
+        unsafe { IsZoomed(h.hwnd.get()) != 0 }
+    })
+    .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+pub(super) fn is_window_zoomed(_window: &slint::Window) -> bool {
+    false
+}
+
+/// Re-align after a window resize settles (a maximize-to-restore in particular),
+/// but only once the drag is over. The OS restores a dragged maximized window at
+/// the *start* of the drag and its move loop keeps pumping timers, so a re-align
+/// fired during the drag is undone when the drag ends: the stale frame then
+/// stays on screen as a transparent strip along the window edge.
+///
+/// A resize drag emits a burst of resize events, so a pending flag makes sure
+/// only one re-align chain runs per window.
+pub(super) fn schedule_restore_realign(
+    weak: slint::Weak<AppWindow>,
+    pending: std::rc::Rc<std::cell::Cell<bool>>,
+    attempt: u32,
+) {
+    if attempt == 0 {
+        if pending.replace(true) {
+            return;
+        }
+    } else if attempt > 60 {
+        // ~7 s of drag at 120 ms per attempt; a drag cannot outlast that.
+        pending.set(false);
         return;
     }
     slint::Timer::single_shot(std::time::Duration::from_millis(120), move || {
         if primary_button_down() {
-            schedule_restore_realign(weak, attempt + 1);
+            schedule_restore_realign(weak, pending, attempt + 1);
             return;
         }
         let Some(win) = weak.upgrade() else {
+            pending.set(false);
             return;
         };
         realign_frameless_surface(&win.window(), true);
-        // The OS settles the frame one more time after the release; repeat once.
-        let again = win.as_weak();
-        slint::Timer::single_shot(std::time::Duration::from_millis(200), move || {
-            if let Some(win) = again.upgrade() {
-                realign_frameless_surface(&win.window(), true);
-            }
-        });
+        // The window manager re-applies the restored frame a few more times
+        // after the release, so keep re-aligning until it stops moving.
+        settle_realign(win.as_weak(), pending, vec![200, 600, 1200]);
+    });
+}
+
+/// Repeat a forced re-align on a fixed schedule, clearing pending when done.
+fn settle_realign(
+    weak: slint::Weak<AppWindow>,
+    pending: std::rc::Rc<std::cell::Cell<bool>>,
+    remaining: Vec<u64>,
+) {
+    let mut rest = remaining;
+    if rest.is_empty() {
+        pending.set(false);
+        return;
+    }
+    let delay = rest.remove(0);
+    slint::Timer::single_shot(std::time::Duration::from_millis(delay), move || {
+        if let Some(win) = weak.upgrade() {
+            // Only repair on later passes if the frame actually drifted again.
+            realign_frameless_surface(&win.window(), false);
+        }
+        settle_realign(weak, pending, rest);
     });
 }
 
@@ -790,7 +875,11 @@ pub(super) fn wire_window_controls(
                     if !m {
                         // The OS finishes restoring the frame after the click, so
                         // defer the re-align until the window has settled.
-                        schedule_restore_realign(w.as_weak(), 0);
+                        schedule_restore_realign(
+                            w.as_weak(),
+                            std::rc::Rc::new(std::cell::Cell::new(false)),
+                            0,
+                        );
                     }
                 }
             }

@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-11-18
+
+- **拖动还原后的透明边框（第三次修复）。** 之前的重排只在系统明确报告"最大化→还原"时启动，而拖动还原时窗口状态会滞后，重排可能一次都没跑，透明条就一直留着。现在只要窗口尺寸发生变化、并且系统已不再处于最大化（用 IsZoomed 判断，不看缓存的标志），就在鼠标松开后重排，并在 200 / 600 / 1200 ms 各补一次；最大化状态下绝不重排。诊断信息（客户区偏移、DWM 实际边框）写入 exe 同目录的 log/error.log。
+- **Transparent border after a drag-restore (third fix).** The re-align only started when the OS reported a clean maximize-to-restore edge, but that state can lag during an OS-driven restore, so the re-align might never run and the transparent strip stayed. Now any size change while the window is no longer maximized (checked with IsZoomed rather than a cached flag) schedules a re-align once the mouse is released, repeated at 200 / 600 / 1200 ms; a maximized window is never re-aligned. Diagnostics (client offset, real DWM frame) go to log/error.log next to the executable.
+
 ## [0.8.6] - 2026-11-18
 
 - **进一步修复最大化还原后的白边。** 拖动还原时系统在拖动过程中还会重新计算一次边框，之前那次重绘会被覆盖，拖动越快残留越明显。现在等到鼠标松开、窗口定下来之后再重绘（并补一次 DWM 边框刷新），同时隐藏系统给无边框窗口画的 1px 描边。

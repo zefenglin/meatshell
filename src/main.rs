@@ -166,6 +166,15 @@ fn init_tracing() {
 
     let env_filter =
         quiet_noise(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")));
+    // Keep the frameless-window re-align trail in the file so a user can send it
+    // for diagnosis without setting RUST_LOG (#278).
+    let file_filter = {
+        let mut f = quiet_noise(EnvFilter::new("warn"));
+        if let Ok(directive) = "window_chrome=info".parse() {
+            f = f.add_directive(directive);
+        }
+        f
+    };
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(env_filter);
@@ -178,7 +187,7 @@ fn init_tracing() {
             fmt::layer()
                 .with_ansi(false)
                 .with_writer(logging::CappedWriter::new(cf))
-                .with_filter(quiet_noise(EnvFilter::new("warn")))
+                .with_filter(file_filter)
         });
 
     tracing_subscriber::registry()

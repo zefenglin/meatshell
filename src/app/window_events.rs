@@ -62,6 +62,9 @@ pub(super) fn install_window_event_hook(
         let mut occluded = false;
         // Tracks the maximize→restore edge for the frameless surface re-align.
         let mut was_maximized = false;
+        // One deferred re-align at a time: a resize drag emits a burst of
+        // Resized events and every one of them would otherwise start a timer.
+        let realign_pending = Rc::new(Cell::new(false));
         // Apply the Win11 rounded-corner hint once, on the first event (the HWND
         // reliably exists by then, unlike a pre-run timer) (#166).
         let mut chrome_done = false;
@@ -323,13 +326,23 @@ pub(super) fn install_window_event_hook(
                             win.set_window_maximized(maxed);
                             let restored = restored_from_maximized(was_maximized, maxed);
                             was_maximized = maxed;
-                            if restored {
-                                // Dragging a maximized frameless window back to
-                                // normal size leaves the Slint surface on the old
-                                // client offset until it is explicitly re-aligned;
-                                // otherwise a 7 px strip along the window edge is
-                                // never painted (white when a window is behind it).
-                                schedule_restore_realign(win.as_weak(), 0);
+                            // The OS restores a maximized window through its own
+                            // move loop, and the maximized flag reported by the
+                            // resize event can still be stale at that moment, so
+                            // the restore edge alone misses it. Re-align after
+                            // every settled resize instead (the scheduler waits
+                            // for the mouse button to come up first).
+                            if !minimized && !is_window_zoomed(&win.window()) {
+                                tracing::debug!(
+                                    target: "window_chrome",
+                                    restored,
+                                    "scheduling post-resize re-align"
+                                );
+                                schedule_restore_realign(
+                                    win.as_weak(),
+                                    realign_pending.clone(),
+                                    0,
+                                );
                             }
                             // The OS can leave fullscreen on its own (macOS
                             // green button / gesture): drop the chromeless
