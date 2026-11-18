@@ -370,8 +370,12 @@ export component CommandEditor inherits Rectangle {
                     color: Theme.text-primary;
                     font-family: Theme.font-mono;
                     font-size: Theme.fs-md;
-                    selection-background-color: Theme.accent;
-                    selection-foreground-color: #ffffff;
+                    // Same wash the terminal paints over a drag-selection: a
+                    // tinted accent behind the text, glyphs left in the normal
+                    // text colour. A solid accent with white text (the style
+                    // default) made the editor and the terminal disagree.
+                    selection-background-color: Theme.term-selection-color;
+                    selection-foreground-color: Theme.text-primary;
                     page-height: ed-scroll.visible-height;
                     cursor-position-changed(position) => {
                         let cursor-y = position.y + self.y + ed-scroll.content-y;
@@ -461,16 +465,15 @@ export component CommandEditor inherits Rectangle {
 
             // --- Rectangle highlight --------------------------------------
             // One solid block, like Notepad++: character columns on every line
-            // of the block, drawn over the text.
+            // of the block. Painted with the terminal's selection wash and no
+            // outline, so a column block and a drag look the same.
             if root.sel-start-col >= 0 && root.sel-end-col > root.sel-start-col : Rectangle {
                 x: 8px + root.sel-start-col * root.cell-w;
                 y: 8px + ed-scroll.content-y
                     + min(root.column-anchor, root.column-caret-line) * root.line-h;
                 width: max(1px, (root.sel-end-col - root.sel-start-col) * root.cell-w);
                 height: root.block-lines() * root.line-h;
-                background: Theme.accent.with-alpha(0.30);
-                border-color: Theme.accent;
-                border-width: 1px;
+                background: Theme.term-selection-color;
             }
 
             // --- Carets of a collapsed block -------------------------------

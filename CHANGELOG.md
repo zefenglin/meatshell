@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-11-18
+
+- **命令输入框的选中颜色与终端统一。** 命令编辑器里的文字选中原来是样式默认的"实心主题色 + 白字"，而终端是主题色 40% 透明的一层浅色、文字保持自己的颜色，同一个拖选在两处看起来像两个软件；拖出来的矩形块还额外多一圈描边。现在两处都用终端那套选中色，矩形块也不再画描边。
+- **The command editor now selects with the terminal's colours.** Selecting text there used the style default — a solid accent fill with white text — while the terminal paints a 40 % accent wash under text that keeps its own colour, so the same drag looked like two different applications; the column block also drew an outline. Both now use the terminal's selection colour, and the block has no outline any more.
+
 ## [0.8.10] - 2026-11-18
 
 - **双击标题栏无法最大化（0.8.9 的回归）。** 0.8.9 把指针抓取的清理逻辑从 Linux 推广到了所有平台：拖动结束后补发一次"释放 + 移出"事件。但这次补发的释放位置在窗口外，它不会产生点击，却会清掉按下状态和连击计数，紧接着的真实点击就被吃掉了 —— 双击自然也就消失了。现在这段逻辑重新只在 Linux 生效（在那边系统确实会吞掉松开事件）。

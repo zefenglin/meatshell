@@ -170,7 +170,10 @@ export global Theme {
     out property <brush> term-bg: root.wallpaper-active ? base-term-bg.with-alpha(max(0.0, root.panel-alpha - 0.14)) : base-term-bg;
     out property <brush> term-fg: root.tc.fg;
     out property <color> term-cursor: root.tc.cursor;
-    out property <brush> term-selection: root.tc.custom ? root.tc.selection : root.accent.with-alpha(0.40);
+    // Solid variant of the same value, for widgets whose selection colour is a
+    // plain <color> (TextInput) rather than a brush.
+    out property <color> term-selection-color: root.tc.custom ? root.tc.selection : root.accent.with-alpha(0.40);
+    out property <brush> term-selection: root.term-selection-color;
 
     // True on macOS (set by Rust). App shortcuts use Cmd (⌘) here instead of
     // Ctrl, so the physical Ctrl key stays free for the shell (^C/^X…) (#158).
