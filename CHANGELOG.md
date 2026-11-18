@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-11-18
+
+- **拖动还原后的透明边框（第四次修复）。** 不再让系统在拖动过程中顺带还原窗口：按下标题栏后先等指针真正移动，再由程序自己按"还原按钮"的方式还原窗口（还原完成后再交给系统拖动），于是"最大化→还原"走的是已知干净的那条路径；如果 0.9 s 内没有检测到拖动就退回原来的行为，保证拖动不会失效。还原后仍会重新计算边框、做一次尺寸微调（加宽加高 3px 再复原）逼渲染层重建绘制表面，并带 FRAMECHANGED 让系统重算非客户区，重排延续到 2.5 s，另外在还原后第一次把鼠标移进窗口时再检查修复一次。诊断日志（外框 / 客户区 / 渲染层尺寸、边缘像素、DWM 边框）写入 exe 同目录的 log/error.log。
+- **Transparent border after a drag-restore (fourth fix).** The OS no longer restores the window as a side effect of the drag: after pressing the title bar the application waits for real pointer motion, restores the window the same way the maximize button does, and only then hands it to the OS move loop, so the maximize-to-restore transition takes the path known to be clean; if no drag is detected within 0.9 s it falls back to the previous behaviour so dragging never breaks. The restore still recomputes the frame and performs a size nudge (3 px wider and taller, then back) to make the renderer rebuild its drawable, with FRAMECHANGED so the OS recomputes the non-client area, the repair chain runs up to 2.5 s, and the first pointer motion over the window re-checks and repairs once more. Diagnostics (outer / client / renderer sizes, edge pixels, DWM frame) go to log/error.log next to the executable.
+
 ## [0.8.7] - 2026-11-18
 
 - **拖动还原后的透明边框（第三次修复）。** 之前的重排只在系统明确报告"最大化→还原"时启动，而拖动还原时窗口状态会滞后，重排可能一次都没跑，透明条就一直留着。现在只要窗口尺寸发生变化、并且系统已不再处于最大化（用 IsZoomed 判断，不看缓存的标志），就在鼠标松开后重排，并在 200 / 600 / 1200 ms 各补一次；最大化状态下绝不重排。诊断信息（客户区偏移、DWM 实际边框）写入 exe 同目录的 log/error.log。

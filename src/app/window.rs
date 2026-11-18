@@ -312,6 +312,321 @@ pub(super) fn is_window_zoomed(_window: &slint::Window) -> bool {
     false
 }
 
+/// Diagnostic probe: report the composited pixels along the window edges next to
+/// the native geometry. A strip that shows whatever is behind the window while
+/// the client rect is already correct means the desktop compositor still holds
+/// the maximized frame, not that the client rect is stale.
+#[cfg(windows)]
+pub(super) fn probe_window_edges(window: &slint::Window, tag: &str) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinPoint {
+        x: i32,
+        y: i32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct WindowPlacement {
+        length: u32,
+        flags: u32,
+        show_cmd: u32,
+        min_position: WinPoint,
+        max_position: WinPoint,
+        normal_position: WinRect,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
+        fn GetClientRect(hwnd: isize, rect: *mut WinRect) -> i32;
+        fn ClientToScreen(hwnd: isize, point: *mut WinPoint) -> i32;
+        fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> i32;
+        fn IsZoomed(hwnd: isize) -> i32;
+        fn GetWindowDC(hwnd: isize) -> isize;
+        fn ReleaseDC(hwnd: isize, dc: isize) -> i32;
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct BitmapInfoHeader {
+        size: u32,
+        width: i32,
+        height: i32,
+        planes: u16,
+        bit_count: u16,
+        compression: u32,
+        size_image: u32,
+        x_pels_per_meter: i32,
+        y_pels_per_meter: i32,
+        clr_used: u32,
+        clr_important: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct BitmapInfo {
+        header: BitmapInfoHeader,
+        colors: [u32; 3],
+    }
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateCompatibleDC(dc: isize) -> isize;
+        fn CreateCompatibleBitmap(dc: isize, width: i32, height: i32) -> isize;
+        fn SelectObject(dc: isize, object: isize) -> isize;
+        fn BitBlt(
+            dst: isize,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            src: isize,
+            src_x: i32,
+            src_y: i32,
+            rop: u32,
+        ) -> i32;
+        fn GetDIBits(
+            dc: isize,
+            bitmap: isize,
+            start: u32,
+            lines: u32,
+            bits: *mut u8,
+            info: *mut BitmapInfo,
+            usage: u32,
+        ) -> i32;
+        fn DeleteObject(object: isize) -> i32;
+        fn DeleteDC(dc: isize) -> i32;
+    }
+    const SRCCOPY: u32 = 0x00CC_0020;
+    const DIB_RGB_COLORS: u32 = 0;
+
+    let slint_size = window.size();
+    let _ = window.with_winit_window(|ww| {
+        let handle = ww.window_handle().ok()?;
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return None;
+        };
+        let hwnd = h.hwnd.get();
+        unsafe {
+            let mut outer = WinRect::default();
+            let mut client = WinRect::default();
+            let mut origin = WinPoint::default();
+            let mut placement = WindowPlacement::default();
+            placement.length = std::mem::size_of::<WindowPlacement>() as u32;
+            if GetWindowRect(hwnd, &mut outer) == 0
+                || GetClientRect(hwnd, &mut client) == 0
+                || ClientToScreen(hwnd, &mut origin) == 0
+            {
+                return None;
+            }
+            let _ = GetWindowPlacement(hwnd, &mut placement);
+            let outer_w = (outer.right - outer.left).max(0);
+            let outer_h = (outer.bottom - outer.top).max(0);
+            let mut left_edge = String::new();
+            let mut top_edge = String::new();
+            // The screen DC cannot be blitted from this process (it fails with
+            // ERROR_INVALID_HANDLE), so read the window's own surface instead:
+            // the pixels the application painted along the very edge. An inset
+            // client area shows up here as a strip that does not match the UI.
+            let surface = GetWindowDC(hwnd);
+            if surface != 0 {
+                let strip = |src: isize, src_x: i32, src_y: i32, width: i32, height: i32| {
+                    let mem = CreateCompatibleDC(src);
+                    if mem == 0 {
+                        return String::new();
+                    }
+                    let bitmap = CreateCompatibleBitmap(src, width, height);
+                    let mut pixels = String::new();
+                    if bitmap != 0 {
+                        let previous = SelectObject(mem, bitmap);
+                        if BitBlt(mem, 0, 0, width, height, src, src_x, src_y, SRCCOPY) != 0 {
+                            let mut info = BitmapInfo::default();
+                            info.header.size = std::mem::size_of::<BitmapInfoHeader>() as u32;
+                            info.header.width = width;
+                            info.header.height = -height;
+                            info.header.planes = 1;
+                            info.header.bit_count = 32;
+                            let mut buffer = vec![0u8; (width * height * 4) as usize];
+                            if GetDIBits(
+                                mem,
+                                bitmap,
+                                0,
+                                height as u32,
+                                buffer.as_mut_ptr(),
+                                &mut info,
+                                DIB_RGB_COLORS,
+                            ) != 0
+                            {
+                                for pixel in buffer.chunks_exact(4) {
+                                    pixels.push_str(&format!(
+                                        "{:02x}{:02x}{:02x},",
+                                        pixel[2], pixel[1], pixel[0]
+                                    ));
+                                }
+                            }
+                        }
+                        SelectObject(mem, previous);
+                        DeleteObject(bitmap);
+                    }
+                    DeleteDC(mem);
+                    pixels
+                };
+                // Window DC coordinates are relative to the window rect.
+                left_edge = strip(surface, 0, outer_h / 2, 12, 1);
+                top_edge = strip(surface, outer_w / 2, 0, 1, 12);
+                ReleaseDC(hwnd, surface);
+            }
+            let inner = ww.inner_size();
+            tracing::info!(
+                target: "window_chrome",
+                tag,
+                outer = %format!("{outer_w}x{outer_h}@({},{})", outer.left, outer.top),
+                client = %format!(
+                    "{}x{}@({},{})",
+                    client.right - client.left,
+                    client.bottom - client.top,
+                    origin.x - outer.left,
+                    origin.y - outer.top
+                ),
+                inner = %format!("{}x{}", inner.width, inner.height),
+                slint = %format!("{}x{}", slint_size.width, slint_size.height),
+                scale = ww.scale_factor(),
+                zoomed = IsZoomed(hwnd) != 0,
+                show_cmd = placement.show_cmd,
+                left_edge = %left_edge,
+                top_edge = %top_edge,
+                "window edge probe"
+            );
+        }
+        Some(())
+    });
+}
+
+#[cfg(not(windows))]
+pub(super) fn probe_window_edges(_window: &slint::Window, _tag: &str) {}
+
+/// Force the desktop compositor to rebuild the window frame and surface. A
+/// frameless window dragged out of the maximized state can keep compositing the
+/// maximized frame even though every native rectangle already reports the
+/// restored geometry; cloaking it for a moment makes DWM re-evaluate the window.
+#[cfg(windows)]
+pub(super) fn nudge_compositor(window: &slint::Window) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(hwnd: isize, attr: u32, pv: isize, cb: u32) -> i32;
+    }
+    // DWMWA_CLOAK = 13.
+    const DWMWA_CLOAK: u32 = 13;
+    window
+        .with_winit_window(|ww| {
+            let handle = ww.window_handle().ok()?;
+            let RawWindowHandle::Win32(h) = handle.as_raw() else {
+                return None;
+            };
+            let hwnd = h.hwnd.get();
+            unsafe {
+                let on: i32 = 1;
+                let off: i32 = 0;
+                let cloak = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &on as *const i32 as isize, 4);
+                let reveal = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &off as *const i32 as isize, 4);
+                tracing::info!(target: "window_chrome", cloak, reveal, "compositor cloak cycle");
+            }
+            Some(())
+        })
+        .is_some()
+}
+
+#[cfg(not(windows))]
+pub(super) fn nudge_compositor(_window: &slint::Window) -> bool {
+    false
+}
+
+/// Force the renderer to recreate its drawable at the current size. A frameless
+/// window that comes back from the maximized state can keep painting into a
+/// surface of the old size while every rectangle already reports the restored
+/// geometry; a real resize makes the compositor and the renderer agree again.
+#[cfg(windows)]
+pub(super) fn nudge_window_size(window: &slint::Window) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
+        fn SetWindowPos(
+            hwnd: isize,
+            after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+        fn IsZoomed(hwnd: isize) -> i32;
+    }
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_NOOWNERZORDER: u32 = 0x0200;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    window
+        .with_winit_window(|ww| {
+            let handle = ww.window_handle().ok()?;
+            let RawWindowHandle::Win32(h) = handle.as_raw() else {
+                return None;
+            };
+            let hwnd = h.hwnd.get();
+            unsafe {
+                if IsZoomed(hwnd) != 0 {
+                    return None;
+                }
+                let mut rect = WinRect::default();
+                if GetWindowRect(hwnd, &mut rect) == 0 {
+                    return None;
+                }
+                let width = rect.right - rect.left;
+                let height = rect.bottom - rect.top;
+                // FRAMECHANGED makes the window manager recompute the non-client
+                // area; preserving it is what keeps the maximized inset alive.
+                let flags =
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED;
+                let grown =
+                    SetWindowPos(hwnd, 0, rect.left, rect.top, width + 3, height + 3, flags);
+                let shrunk = SetWindowPos(hwnd, 0, rect.left, rect.top, width, height, flags);
+                tracing::info!(
+                    target: "window_chrome",
+                    grown,
+                    shrunk,
+                    width,
+                    height,
+                    "surface size nudge"
+                );
+            }
+            Some(())
+        })
+        .is_some()
+}
+
+#[cfg(not(windows))]
+pub(super) fn nudge_window_size(_window: &slint::Window) -> bool {
+    false
+}
+
+
 /// Re-align after a window resize settles (a maximize-to-restore in particular),
 /// but only once the drag is over. The OS restores a dragged maximized window at
 /// the *start* of the drag and its move loop keeps pumping timers, so a re-align
@@ -343,10 +658,13 @@ pub(super) fn schedule_restore_realign(
             pending.set(false);
             return;
         };
+        probe_window_edges(&win.window(), "release");
         realign_frameless_surface(&win.window(), true);
+        probe_window_edges(&win.window(), "release-aligned");
+        nudge_compositor(&win.window());
         // The window manager re-applies the restored frame a few more times
         // after the release, so keep re-aligning until it stops moving.
-        settle_realign(win.as_weak(), pending, vec![200, 600, 1200]);
+        settle_realign(win.as_weak(), pending, vec![200, 600, 1200, 2500], false);
     });
 }
 
@@ -355,6 +673,7 @@ fn settle_realign(
     weak: slint::Weak<AppWindow>,
     pending: std::rc::Rc<std::cell::Cell<bool>>,
     remaining: Vec<u64>,
+    nudged: bool,
 ) {
     let mut rest = remaining;
     if rest.is_empty() {
@@ -364,10 +683,18 @@ fn settle_realign(
     let delay = rest.remove(0);
     slint::Timer::single_shot(std::time::Duration::from_millis(delay), move || {
         if let Some(win) = weak.upgrade() {
+            probe_window_edges(&win.window(), "settle");
+            // Recreate the drawable once, right after the drag has settled: a
+            // surface left over from the maximized state is the one thing a
+            // frame-only repair cannot fix.
+            if !nudged {
+                nudge_window_size(&win.window());
+                realign_frameless_surface(&win.window(), true);
+            }
             // Only repair on later passes if the frame actually drifted again.
             realign_frameless_surface(&win.window(), false);
         }
-        settle_realign(weak, pending, rest);
+        settle_realign(weak, pending, rest, true);
     });
 }
 
@@ -540,6 +867,348 @@ pub(super) fn is_wayland_window(window: &slint::Window) -> bool {
 #[cfg(not(target_os = "linux"))]
 pub(super) fn is_wayland_window(_window: &slint::Window) -> bool {
     false
+}
+
+/// Debug-only harness for the maximize → drag → restore path.
+///
+/// `MEATSHELL_TEST_DRAG=old` drives the plain move loop (the behaviour before
+/// the fix); any other value drives the restore-first path. The synthetic input
+/// session this machine runs in cannot deliver clicks to the window, so the
+/// page is started by the application itself and the modal loop is fed with
+/// cursor moves from a helper thread.
+#[cfg(all(windows, debug_assertions))]
+fn spawn_test_drag_hook(weak: slint::Weak<AppWindow>) {
+    let Ok(mode) = std::env::var("MEATSHELL_TEST_DRAG") else {
+        return;
+    };
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(win) = weak.upgrade() else { return };
+            win.window()
+                .with_winit_window(|ww| {
+                    let _ = ww.set_maximized(true);
+                });
+            let weak2 = win.as_weak();
+            slint::Timer::single_shot(std::time::Duration::from_millis(700), move || {
+                let Some(win) = weak2.upgrade() else { return };
+                let Some((left, top)) = window_origin(&win.window()) else {
+                    return;
+                };
+                let base = (left + 120, top + 30);
+                set_cursor(base.0, base.1);
+                tracing::info!(target: "window_chrome", ?base, mode = %mode, "test drag: starting");
+                // A real press is required: the move loop exits at once without
+                // one, and so does the motion poll in the intercept.
+                press_primary();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    for step in 1..=14 {
+                        std::thread::sleep(std::time::Duration::from_millis(60));
+                        set_cursor(base.0 + step * 30, base.1 + step * 22);
+                    }
+                });
+                let weak3 = win.as_weak();
+                let finished = std::rc::Rc::new(std::cell::Cell::new(false));
+                let flag = finished.clone();
+                slint::Timer::single_shot(
+                    std::time::Duration::from_millis(1600),
+                    move || {
+                        if flag.get() {
+                            return;
+                        }
+                        release_primary();
+                        tracing::info!(target: "window_chrome", "test drag: released");
+                        if let Some(win) = weak3.upgrade() {
+                            probe_window_edges(&win.window(), "test-after");
+                        }
+                    },
+                );
+                if mode == "old" {
+                    win.window().with_winit_window(|ww| {
+                        let _ = ww.drag_window();
+                    });
+                } else {
+                    restore_under_cursor_and_drag(&win.window());
+                }
+                finished.set(true);
+                tracing::info!(target: "window_chrome", "test drag: loop returned");
+                release_primary();
+                let weak4 = win.as_weak();
+                slint::Timer::single_shot(std::time::Duration::from_millis(900), move || {
+                    if let Some(win) = weak4.upgrade() {
+                        probe_window_edges(&win.window(), "test-after");
+                    }
+                });
+            });
+        });
+    });
+}
+
+/// Screen origin of the window's outer rectangle.
+#[cfg(all(windows, debug_assertions))]
+fn window_origin(window: &slint::Window) -> Option<(i32, i32)> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
+    }
+    window.with_winit_window(|ww| {
+        let handle = ww.window_handle().ok()?;
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return None;
+        };
+        let mut rect = WinRect::default();
+        let ok = unsafe { GetWindowRect(h.hwnd.get(), &mut rect) };
+        (ok != 0).then_some((rect.left, rect.top))
+    })?
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn press_primary() {
+    #[link(name = "user32")]
+    extern "system" {
+        fn mouse_event(flags: u32, dx: i32, dy: i32, data: u32, extra: usize);
+    }
+    unsafe {
+        mouse_event(0x0002, 0, 0, 0, 0);
+    }
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn release_primary() {
+    #[link(name = "user32")]
+    extern "system" {
+        fn mouse_event(flags: u32, dx: i32, dy: i32, data: u32, extra: usize);
+    }
+    unsafe {
+        mouse_event(0x0004, 0, 0, 0, 0);
+    }
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn set_cursor(x: i32, y: i32) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn SetCursorPos(x: i32, y: i32) -> i32;
+    }
+    unsafe {
+        SetCursorPos(x, y);
+    }
+}
+
+/// Screen position of the mouse pointer.
+#[cfg(windows)]
+fn cursor_pos() -> Option<(i32, i32)> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinPoint {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetCursorPos(point: *mut WinPoint) -> i32;
+    }
+    let mut point = WinPoint::default();
+    let ok = unsafe { GetCursorPos(&mut point) };
+    (ok != 0).then_some((point.x, point.y))
+}
+
+/// Restore a maximized window and start the move loop only once the pointer has
+/// actually moved.
+///
+/// The window manager restores a maximized window inside its own move loop, and
+/// that transition leaves a frameless window with the maximized frame — the
+/// transparent strip. Restoring first and *then* handing over to the move loop
+/// (the transition the maximize button uses, which is clean) avoids it, but the
+/// decision has to wait for real motion so a plain click still does nothing.
+#[cfg(windows)]
+pub(super) fn arm_maximized_drag(
+    weak: slint::Weak<AppWindow>,
+    press: Option<(i32, i32)>,
+    attempt: u32,
+    state: std::rc::Rc<std::cell::Cell<u8>>,
+) {
+    const POLL_MS: u64 = 60;
+    const MAX_ATTEMPTS: u32 = 15;
+    // A few pixels of slack: a shaky click is not a drag.
+    const THRESHOLD: i32 = 5;
+    let press = match press {
+        Some(press) => press,
+        None => {
+            let Some(press) = cursor_pos() else {
+                return;
+            };
+            press
+        }
+    };
+    if attempt > MAX_ATTEMPTS || state.get() != 0 {
+        return;
+    }
+    if attempt == 0 {
+        tracing::info!(target: "window_chrome", press = ?press, "arming maximized drag");
+    }
+    slint::Timer::single_shot(std::time::Duration::from_millis(POLL_MS), move || {
+        if state.get() != 0 {
+            return;
+        }
+        let down = primary_button_down();
+        let now = cursor_pos();
+        if attempt < 4 {
+            tracing::info!(target: "window_chrome", attempt, down, now = ?now, "drag arm poll");
+        }
+        if !down {
+            return;
+        }
+        let Some(now) = now else {
+            return;
+        };
+        if (now.0 - press.0).abs() < THRESHOLD && (now.1 - press.1).abs() < THRESHOLD {
+            arm_maximized_drag(weak, Some(press), attempt + 1, state);
+            return;
+        }
+        tracing::info!(target: "window_chrome", attempt, ?now, "drag motion detected");
+        state.set(1);
+        if let Some(win) = weak.upgrade() {
+            restore_under_cursor_and_drag(&win.window());
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub(super) fn arm_maximized_drag(
+    _weak: slint::Weak<AppWindow>,
+    _press: Option<(i32, i32)>,
+    _attempt: u32,
+    _state: std::rc::Rc<std::cell::Cell<u8>>,
+) {
+}
+
+/// Restore a maximized frameless window under the cursor and then hand the
+/// window to the OS move loop.
+///
+/// Letting the window manager restore the window as part of the drag leaves the
+/// frameless window with the maximized frame, so the surface ends up inset and a
+/// transparent strip shows along the left/top edge. Restoring first — the same
+/// transition the maximize button performs, which is known to be clean — keeps
+/// that code path out of the way entirely.
+#[cfg(windows)]
+pub(super) fn restore_under_cursor_and_drag(window: &slint::Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct WinPoint {
+        x: i32,
+        y: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct WindowPlacement {
+        length: u32,
+        flags: u32,
+        show_cmd: u32,
+        min_position: WinPoint,
+        max_position: WinPoint,
+        normal_position: WinRect,
+    }
+    impl Default for WindowPlacement {
+        fn default() -> Self {
+            Self {
+                length: std::mem::size_of::<Self>() as u32,
+                flags: 0,
+                show_cmd: 0,
+                min_position: WinPoint::default(),
+                max_position: WinPoint::default(),
+                normal_position: WinRect::default(),
+            }
+        }
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetCursorPos(point: *mut WinPoint) -> i32;
+        fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
+        fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> i32;
+        fn SetWindowPlacement(hwnd: isize, placement: *const WindowPlacement) -> i32;
+    }
+    // SW_SHOWNORMAL
+    const SW_NORMAL: u32 = 1;
+
+    let _ = window.with_winit_window(|ww| {
+        let handle = ww.window_handle().ok()?;
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return None;
+        };
+        let hwnd = h.hwnd.get();
+        unsafe {
+            let mut cursor = WinPoint::default();
+            let mut maximized = WinRect::default();
+            let mut placement = WindowPlacement::default();
+            if GetCursorPos(&mut cursor) == 0
+                || GetWindowRect(hwnd, &mut maximized) == 0
+                || GetWindowPlacement(hwnd, &mut placement) == 0
+            {
+                return None;
+            }
+            let width = (maximized.right - maximized.left).max(1);
+            let height = (maximized.bottom - maximized.top).max(1);
+            let normal = placement.normal_position;
+            let normal_width = (normal.right - normal.left).max(1);
+            let normal_height = (normal.bottom - normal.top).max(1);
+            // Keep the pointer on the same relative spot of the window, which is
+            // where the OS would put the restored title bar as well.
+            let ratio_x = ((cursor.x - maximized.left) as f32 / width as f32).clamp(0.0, 1.0);
+            let ratio_y = ((cursor.y - maximized.top) as f32 / height as f32).clamp(0.0, 1.0);
+            let x = cursor.x - (ratio_x * normal_width as f32).round() as i32;
+            let y = cursor.y - (ratio_y * normal_height as f32).round() as i32;
+            let mut target = placement;
+            target.length = std::mem::size_of::<WindowPlacement>() as u32;
+            target.show_cmd = SW_NORMAL;
+            target.normal_position = WinRect {
+                left: x,
+                top: y,
+                right: x + normal_width,
+                bottom: y + normal_height,
+            };
+            let applied = SetWindowPlacement(hwnd, &target);
+            tracing::info!(
+                target: "window_chrome",
+                applied,
+                x,
+                y,
+                normal_width,
+                normal_height,
+                "restored maximized window under the cursor"
+            );
+            if applied == 0 {
+                return None;
+            }
+            let _ = ww.drag_window();
+            Some(())
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub(super) fn restore_under_cursor_and_drag(window: &slint::Window) {
+    let _ = window.with_winit_window(|ww| ww.drag_window());
 }
 
 /// Detect the Windows mixed-DPI failure where the native maximized flag stays
@@ -952,14 +1621,48 @@ pub(super) fn wire_window_controls(
     }
     {
         let weak = window.as_weak();
+        #[cfg(all(windows, debug_assertions))]
+        let hook_weak = weak.clone();
         window.on_win_drag(move || {
             if let Some(w) = weak.upgrade() {
-                w.window().with_winit_window(|ww| {
-                    let _ = ww.drag_window();
-                });
+                let maximized = is_window_zoomed(&w.window());
+                tracing::info!(target: "window_chrome", maximized, "win-drag invoked");
+                if maximized {
+                    // Restore first, then drag: the OS restore during a drag is
+                    // what leaves the frameless frame stale (transparent strip).
+                    // 0 = still waiting, 1 = the restore happened, 2 = gave up.
+                    let state = std::rc::Rc::new(std::cell::Cell::new(0u8));
+                    arm_maximized_drag(weak.clone(), None, 0, state.clone());
+                    let fallback = weak.clone();
+                    slint::Timer::single_shot(
+                        std::time::Duration::from_millis(900),
+                        move || {
+                            // Nothing arm-like happened: fall back to the plain
+                            // move loop so dragging never stops working.
+                            if state.get() == 0 {
+                                state.set(2);
+                                tracing::info!(
+                                    target: "window_chrome",
+                                    "drag intercept idle, falling back to the move loop"
+                                );
+                                if let Some(win) = fallback.upgrade() {
+                                    win.window().with_winit_window(|ww| {
+                                        let _ = ww.drag_window();
+                                    });
+                                }
+                            }
+                        },
+                    );
+                } else {
+                    w.window().with_winit_window(|ww| {
+                        let _ = ww.drag_window();
+                    });
+                }
                 schedule_slint_pointer_ungrab(weak.clone());
             }
         });
+        #[cfg(all(windows, debug_assertions))]
+        spawn_test_drag_hook(hook_weak);
     }
     {
         use i_slint_backend_winit::winit::window::ResizeDirection;

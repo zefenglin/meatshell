@@ -65,6 +65,10 @@ pub(super) fn install_window_event_hook(
         // One deferred re-align at a time: a resize drag emits a burst of
         // Resized events and every one of them would otherwise start a timer.
         let realign_pending = Rc::new(Cell::new(false));
+        // The strip can also appear only after the repair chain finished, so the
+        // first pointer motion over the window re-checks the frame once (and
+        // repairs it) instead of leaving the stale frame on screen.
+        let hover_check = Rc::new(Cell::new(false));
         // Apply the Win11 rounded-corner hint once, on the first event (the HWND
         // reliably exists by then, unlike a pre-run timer) (#166).
         let mut chrome_done = false;
@@ -158,6 +162,11 @@ pub(super) fn install_window_event_hook(
                             let scale = win.window().scale_factor().max(0.01) as f64;
                             let p = position.to_logical::<f64>(scale);
                             last_cursor_logical = Some((p.x as f32, p.y as f32));
+                            if hover_check.replace(false) {
+                                probe_window_edges(&win.window(), "hover");
+                                realign_frameless_surface(&win.window(), false);
+                                probe_window_edges(&win.window(), "hover-aligned");
+                            }
                         }
                     }
                     WEvent::MouseWheel { delta, phase, .. } if cfg!(target_os = "macos") => {
@@ -338,6 +347,7 @@ pub(super) fn install_window_event_hook(
                                     restored,
                                     "scheduling post-resize re-align"
                                 );
+                                hover_check.set(true);
                                 schedule_restore_realign(
                                     win.as_weak(),
                                     realign_pending.clone(),
