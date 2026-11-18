@@ -312,6 +312,59 @@ pub(super) fn is_window_zoomed(_window: &slint::Window) -> bool {
     false
 }
 
+/// Enter the OS move loop, but only while the primary button is really held.
+///
+/// `drag_window` sends `WM_NCLBUTTONDOWN`/`HTCAPTION` synchronously and the move
+/// loop it enters ends on the button release. Entering it after the button is
+/// already up leaves the loop waiting for an event that never comes, which
+/// freezes the UI thread: the window then ignores every click, including the
+/// next attempt to drag it.
+#[cfg(windows)]
+pub(super) fn safe_drag_window(window: &slint::Window) -> bool {
+    if !primary_button_down() {
+        tracing::info!(target: "window_chrome", "move loop skipped: primary button is up");
+        return false;
+    }
+    let _ = window.with_winit_window(|ww| ww.drag_window());
+    true
+}
+
+#[cfg(not(windows))]
+pub(super) fn safe_drag_window(window: &slint::Window) -> bool {
+    let _ = window.with_winit_window(|ww| ww.drag_window());
+    true
+}
+
+/// Where a maximized window should be restored to when it is dragged back to
+/// normal size: the pointer keeps the same relative spot on the window, and the
+/// result is clamped into the monitor work area.
+///
+/// Clamping matters. A drag that starts near the top of the screen yields a
+/// near-zero ratio, so the window lands with its top edge at (or just above)
+/// the top of the desktop; if it is allowed to go further up, the custom title
+/// bar leaves the screen and the window can no longer be grabbed at all.
+pub(super) fn restored_origin(
+    cursor: (i32, i32),
+    maximized: (i32, i32, i32, i32),
+    normal_size: (i32, i32),
+    work: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let (max_left, max_top, max_right, max_bottom) = maximized;
+    let width = (max_right - max_left).max(1);
+    let height = (max_bottom - max_top).max(1);
+    let normal_width = normal_size.0.max(1);
+    let normal_height = normal_size.1.max(1);
+    let ratio_x = ((cursor.0 - max_left) as f32 / width as f32).clamp(0.0, 1.0);
+    let ratio_y = ((cursor.1 - max_top) as f32 / height as f32).clamp(0.0, 1.0);
+    let x = cursor.0 - (ratio_x * normal_width as f32).round() as i32;
+    let y = cursor.1 - (ratio_y * normal_height as f32).round() as i32;
+    let (work_left, work_top, work_right, work_bottom) = work;
+    // A window larger than the work area stays pinned to its top-left corner.
+    let max_x = (work_right - normal_width).max(work_left);
+    let max_y = (work_bottom - normal_height).max(work_top);
+    (x.clamp(work_left, max_x), y.clamp(work_top, max_y))
+}
+
 /// Diagnostic probe: report the composited pixels along the window edges next to
 /// the native geometry. A strip that shows whatever is behind the window while
 /// the client rect is already correct means the desktop compositor still holds
@@ -1141,15 +1194,46 @@ pub(super) fn restore_under_cursor_and_drag(window: &slint::Window) {
             }
         }
     }
+    #[repr(C)]
+    struct MonitorInfo {
+        cb_size: u32,
+        rc_monitor: WinRect,
+        rc_work: WinRect,
+        dw_flags: u32,
+    }
+    // MONITOR_DEFAULTTONEAREST
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
     #[link(name = "user32")]
     extern "system" {
         fn GetCursorPos(point: *mut WinPoint) -> i32;
         fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
         fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> i32;
         fn SetWindowPlacement(hwnd: isize, placement: *const WindowPlacement) -> i32;
+        fn MonitorFromWindow(hwnd: isize, flags: u32) -> isize;
+        fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
     }
     // SW_SHOWNORMAL
     const SW_NORMAL: u32 = 1;
+
+    /// Work area (screen minus taskbar) of the monitor the window sits on.
+    fn work_area(hwnd: isize) -> Option<WinRect> {
+        unsafe {
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if monitor == 0 {
+                return None;
+            }
+            let mut info = MonitorInfo {
+                cb_size: std::mem::size_of::<MonitorInfo>() as u32,
+                rc_monitor: WinRect::default(),
+                rc_work: WinRect::default(),
+                dw_flags: 0,
+            };
+            if GetMonitorInfoW(monitor, &mut info) == 0 {
+                return None;
+            }
+            Some(info.rc_work)
+        }
+    }
 
     let _ = window.with_winit_window(|ww| {
         let handle = ww.window_handle().ok()?;
@@ -1158,6 +1242,15 @@ pub(super) fn restore_under_cursor_and_drag(window: &slint::Window) {
         };
         let hwnd = h.hwnd.get();
         unsafe {
+            // The move loop below has no release to consume once the button is
+            // up, so it would never return. Nothing here is worth doing then.
+            if !primary_button_down() {
+                tracing::info!(
+                    target: "window_chrome",
+                    "restore under cursor skipped: primary button released"
+                );
+                return None;
+            }
             let mut cursor = WinPoint::default();
             let mut maximized = WinRect::default();
             let mut placement = WindowPlacement::default();
@@ -1167,17 +1260,18 @@ pub(super) fn restore_under_cursor_and_drag(window: &slint::Window) {
             {
                 return None;
             }
-            let width = (maximized.right - maximized.left).max(1);
-            let height = (maximized.bottom - maximized.top).max(1);
             let normal = placement.normal_position;
             let normal_width = (normal.right - normal.left).max(1);
             let normal_height = (normal.bottom - normal.top).max(1);
-            // Keep the pointer on the same relative spot of the window, which is
-            // where the OS would put the restored title bar as well.
-            let ratio_x = ((cursor.x - maximized.left) as f32 / width as f32).clamp(0.0, 1.0);
-            let ratio_y = ((cursor.y - maximized.top) as f32 / height as f32).clamp(0.0, 1.0);
-            let x = cursor.x - (ratio_x * normal_width as f32).round() as i32;
-            let y = cursor.y - (ratio_y * normal_height as f32).round() as i32;
+            // The maximized rect already covers the work area of the monitor the
+            // window is on, which is a serviceable fallback if the query fails.
+            let work = work_area(hwnd).unwrap_or(maximized);
+            let (x, y) = restored_origin(
+                (cursor.x, cursor.y),
+                (maximized.left, maximized.top, maximized.right, maximized.bottom),
+                (normal_width, normal_height),
+                (work.left, work.top, work.right, work.bottom),
+            );
             let mut target = placement;
             target.length = std::mem::size_of::<WindowPlacement>() as u32;
             target.show_cmd = SW_NORMAL;
@@ -1200,7 +1294,14 @@ pub(super) fn restore_under_cursor_and_drag(window: &slint::Window) {
             if applied == 0 {
                 return None;
             }
-            let _ = ww.drag_window();
+            if primary_button_down() {
+                let _ = ww.drag_window();
+            } else {
+                tracing::info!(
+                    target: "window_chrome",
+                    "move loop skipped after restore: primary button released"
+                );
+            }
             Some(())
         }
     });
@@ -1320,15 +1421,16 @@ pub(super) fn set_term_fullscreen(win: &AppWindow, on: bool) {
 #[path = "../../tests/app/term_fullscreen/mod.rs"]
 mod term_fullscreen_tests;
 
-#[cfg(target_os = "linux")]
 pub(super) fn schedule_slint_pointer_ungrab<T>(weak: slint::Weak<T>)
 where
     T: slint::ComponentHandle + 'static,
 {
-    // Linux window managers/compositors may consume the release event after a
-    // system move/resize starts. If Slint keeps its press grab, the whole app
-    // can remain stuck in move/resize cursor mode. A few deferred synthetic
-    // releases cover Cinnamon/Mutter/KWin timing differences.
+    // The OS move/resize loop may consume the release event: Linux window
+    // managers/compositors do it routinely (Cinnamon/Mutter/KWin), and the
+    // Windows move loop does when it ends early. If Slint keeps its press grab,
+    // the whole app stays stuck in move/resize mode — no item ever sees the
+    // button go up, so the next press is ignored and the window can no longer be
+    // dragged. A few deferred synthetic releases cover the timing differences.
     for delay_ms in [0_u64, 16, 80, 200] {
         let weak2 = weak.clone();
         slint::Timer::single_shot(std::time::Duration::from_millis(delay_ms), move || {
@@ -1342,13 +1444,6 @@ where
             }
         });
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(super) fn schedule_slint_pointer_ungrab<T>(_weak: slint::Weak<T>)
-where
-    T: slint::ComponentHandle + 'static,
-{
 }
 
 /// macOS-only: install a custom winit backend that makes the native title bar
@@ -1645,18 +1740,16 @@ pub(super) fn wire_window_controls(
                                     target: "window_chrome",
                                     "drag intercept idle, falling back to the move loop"
                                 );
+                                // Only while the button is still held: the
+                                // loop would otherwise hang the UI thread.
                                 if let Some(win) = fallback.upgrade() {
-                                    win.window().with_winit_window(|ww| {
-                                        let _ = ww.drag_window();
-                                    });
+                                    safe_drag_window(&win.window());
                                 }
                             }
                         },
                     );
                 } else {
-                    w.window().with_winit_window(|ww| {
-                        let _ = ww.drag_window();
-                    });
+                    safe_drag_window(&w.window());
                 }
                 schedule_slint_pointer_ungrab(weak.clone());
             }

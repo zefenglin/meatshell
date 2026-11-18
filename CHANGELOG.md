@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-11-18
+
+- **拖动还原后窗口卡在屏幕顶端、再也拖不动。** 两处都修好了：还原位置现在会被限制在当前显示器的工作区内，标题栏一定留在屏幕上（拖动起点靠近屏幕顶端时，按比例算出的位置会把标题栏推到屏幕外面，于是抓不到）；更重要的是进入系统移动循环前会先确认左键确实还按着 —— 那个循环靠"松开"事件退出，在按键已经松开之后才进入，循环就再也等不到退出事件，UI 线程会永久卡在里面，此后窗口不响应任何点击，重新最大化/还原也没用。另外指针抓取清理不再只作用于 Linux：系统吞掉松开事件后，应用会一直以为鼠标还按着，现在同样会补发释放。
+- **A restore-by-drag could pin the window to the top of the screen and break dragging.** Two fixes: the restore position is now clamped into the work area of the current monitor, so the title bar always stays on screen (a drag started near the top edge produced an origin above the desktop, leaving nothing to grab); and the OS move loop is only entered while the primary button is really held — the loop ends on the button release, so entering it after the button is up leaves it waiting for an event that never arrives, freezing the UI thread for good (the window then ignores every click, including another drag or a re-maximize). Pointer-grab cleanup is no longer Linux-only either: when the OS swallows the release, the app no longer believes the button is still down.
+
 ## [0.8.8] - 2026-11-18
 
 - **拖动还原后的透明边框（第四次修复）。** 不再让系统在拖动过程中顺带还原窗口：按下标题栏后先等指针真正移动，再由程序自己按"还原按钮"的方式还原窗口（还原完成后再交给系统拖动），于是"最大化→还原"走的是已知干净的那条路径；如果 0.9 s 内没有检测到拖动就退回原来的行为，保证拖动不会失效。还原后仍会重新计算边框、做一次尺寸微调（加宽加高 3px 再复原）逼渲染层重建绘制表面，并带 FRAMECHANGED 让系统重算非客户区，重排延续到 2.5 s，另外在还原后第一次把鼠标移进窗口时再检查修复一次。诊断日志（外框 / 客户区 / 渲染层尺寸、边缘像素、DWM 边框）写入 exe 同目录的 log/error.log。
