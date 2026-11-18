@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-11-18
+
+- **松开 Shift+Alt 之后，矩形框仍然赖在那里。** 对齐 Notepad++ 的列模式：只要光标因为别的原因移动了（在别处点一下、拖选、按方向键），列模式立刻结束，矩形随之消失，光标就落在你点的位置。另外修掉了两个会让它「偶尔不退出」的问题：判断「刚点了一下」用的是所有命令输入框共享的一个边沿标记，谁先读到就被谁消费掉，其它输入框永远收不到；而快于 40 ms 的一次点击整个落在两次轮询之间，同样收不到。现在改为读「左键此刻是否按着」，既不共享也不会漏。列模式内的复制、松手即复制、增删矩形范围都保持不变。
+- **The block kept hanging around after Shift+Alt was released.** Column mode now follows Notepad++: as soon as the caret moves for any other reason — a click elsewhere, a drag, an arrow key — the mode ends, the block disappears and the caret stays where you put it. Two reasons it sometimes did not leave are fixed as well: the "a click just happened" flag was a shared edge marker for every command editor, so whichever one polled first consumed it and the others never saw it; and a click shorter than 40 ms fell entirely between two polls. Both are replaced by reading whether the primary button is held right now, which is neither shared nor missable. Copying, copy-on-release and growing the block work as before.
+
 ## [0.8.13] - 2026-11-18
 
 - **命令输入框：点击定位、矩形选择与复制。** 四个问题一起修好了。① 以前那个覆盖在文本框上的鼠标层一直拦着左键，光标位置是按"单元格宽高"估算出来的，滚动之后还会算错（竖直偏移的符号写反了，横向滚动完全没算），所以点哪光标经常不在哪；现在这层只在按住 Shift+Alt 或正在拖矩形时才启用，普通点击直接交给文本框自己按字形做精确命中。② 矩形选择改用与绘制完全一致的换算（含横向滚动）、按字符列向下取整，拖到文本以外也不会再把块拉长到不存在的位置。③ 拖完矩形松手即复制（和终端一样），Ctrl+C 也能复制；短行按行尾截断，不补空格。④ 已经有矩形时再按 Shift+Alt 拖动，固定角保持不动、只移动活动角，因此可以反复扩大或缩小，不必重新点起点。另外：Alt/Shift 的按下状态改为直接向系统查询（原来只在带文字的按键事件里更新，单独按修饰键时状态是旧的）。

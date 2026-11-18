@@ -25,7 +25,6 @@ export struct EditorInputState {
     supported: bool,
     rect-armed: bool,    // Shift and Alt are held right now
     button-down: bool,   // the primary mouse button is held right now
-    plain-click: bool,   // the button just went down without Shift+Alt
 }
 
 // The large command editor that lives in the file-transfer panel's Command
@@ -73,6 +72,13 @@ export component CommandEditor inherits Rectangle {
     // Line count of the buffer as last reported by Rust; 0 means "not known
     // yet", which is only true before the first query.
     property <int> text-lines: 0;
+    // Byte offset this component last put the caret at itself. The caret
+    // moving away from it means the user moved it (a click, a drag, an arrow
+    // key), which leaves column mode the way Notepad++ does.
+    property <int> expected-caret: 0;
+    // True while this component is moving the caret itself: the watch below
+    // must not read its own bookkeeping as a user move.
+    property <bool> syncing-caret: false;
     // Cell size of the editor font, measured off-screen below. Mouse pixels
     // become (line, column) through these two.
     property <length> cell-w: mono-ruler.preferred-width / 10;
@@ -104,6 +110,7 @@ export component CommandEditor inherits Rectangle {
     // re-seeded through set-selection-offsets so the widget never re-derives
     // the column on its own.
     function apply-step(op: int, typed: string) {
+        root.syncing-caret = true;
         let result = root.step(edit-input.text, edit-input.cursor-position-byte-offset,
             root.column-anchor, root.sel-start-col, root.sel-end-col, op, typed);
         root.column-anchor = result.anchor-line;
@@ -120,8 +127,12 @@ export component CommandEditor inherits Rectangle {
             root.sel-start-col = -1;
             root.sel-end-col = -1;
         }
+        // Announce the caret before the text lands: assigning text can nudge
+        // the widget's own caret and would otherwise read as a user move.
+        root.expected-caret = result.caret;
         edit-input.text = result.text;
         edit-input.set-selection-offsets(result.caret, result.caret);
+        root.syncing-caret = false;
     }
 
     function block-lines() -> int {
@@ -201,12 +212,14 @@ export component CommandEditor inherits Rectangle {
         root.column-index = root.drag-col;
         root.sel-start-col = -1;
         root.sel-end-col = -1;
+        root.expected-caret = spot.caret;
         edit-input.set-selection-offsets(spot.caret, spot.caret);
     }
 
     function extend-caret(x: length, y: length) {
         let spot = root.place(root.line-at(y), root.col-at(x));
         root.text-lines = max(1, spot.lines);
+        root.expected-caret = spot.caret;
         edit-input.set-selection-offsets(
             root.byte-at(root.drag-line, root.drag-col), spot.caret);
     }
@@ -227,6 +240,7 @@ export component CommandEditor inherits Rectangle {
         root.column-anchor = root.drag-line;
         root.column-caret-line = root.drag-line;
         root.column-index = root.drag-col;
+        root.expected-caret = spot.caret;
         edit-input.set-selection-offsets(spot.caret, spot.caret);
     }
 
@@ -248,6 +262,7 @@ export component CommandEditor inherits Rectangle {
         root.column-anchor = root.click-line;
         root.column-caret-line = line;
         root.column-index = root.sel-start-col;
+        root.expected-caret = spot.caret;
         edit-input.set-selection-offsets(spot.caret, spot.caret);
     }
 
@@ -634,6 +649,21 @@ export component CommandEditor inherits Rectangle {
         }
     }
 
+    // Leaving column mode without the chord: Notepad++ drops a column
+    // selection as soon as the caret moves for any other reason, and a click
+    // outside the block is exactly that. The text input places the caret
+    // natively, this notices the new offset and ends the block, so the caret
+    // stays where the click put it.
+    // Slint cannot observe a child property directly (a dotted `changed` does
+    // not parse), so mirror the text input's caret here and watch the mirror.
+    property <int> live-caret: edit-input.cursor-position-byte-offset;
+    changed live-caret => {
+        if (!root.syncing-caret && root.column-anchor >= 0
+            && root.live-caret != root.expected-caret) {
+            root.clear-block();
+        }
+    }
+
     // Slint drops bare modifier presses before they reach the UI (the winit
     // backend ignores key events without text), so rectangle mode is polled
     // from the OS instead: 40ms is faster than a press, and the mouse layer
@@ -647,7 +677,10 @@ export component CommandEditor inherits Rectangle {
             if (state.supported && !state.button-down) {
                 root.finish-rect();
             }
-            if (state.plain-click && root.column-anchor >= 0) {
+            // A press without the chord leaves column mode. Checking the held
+            // button rather than the press edge cannot miss a quick click.
+            if (root.column-anchor >= 0 && !root.rect-dragging
+                && state.button-down && !state.rect-armed) {
                 root.clear-block();
             }
         }

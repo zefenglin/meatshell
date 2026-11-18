@@ -91,17 +91,10 @@ pub(super) fn wire_key_input(
     // rectangle is actually being made, which is what gives ordinary clicks
     // the text input's exact hit testing.
     {
-        let last_down = std::rc::Rc::new(std::cell::Cell::new(false));
-        window.on_command_poll_input(move || {
-            let down = crate::app::window::primary_button_down();
-            let edge = down && !last_down.replace(down);
-            let armed = crate::app::window::modifier_armed();
-            EditorInputState {
-                supported: crate::app::window::command_input_polling_supported(),
-                rect_armed: armed,
-                button_down: down,
-                plain_click: edge && !armed,
-            }
+        window.on_command_poll_input(move || EditorInputState {
+            supported: crate::app::window::command_input_polling_supported(),
+            rect_armed: crate::app::window::modifier_armed(),
+            button_down: crate::app::window::primary_button_down(),
         });
     }
     // Rectangle copy: the editor names the character columns, Rust cuts them
