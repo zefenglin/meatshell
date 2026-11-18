@@ -1766,7 +1766,9 @@ pub(super) fn wire_window_controls(
             }
         });
         #[cfg(all(windows, debug_assertions))]
-        spawn_test_drag_hook(hook_weak);
+        {
+            spawn_test_drag_hook(hook_weak);
+        }
     }
     {
         use i_slint_backend_winit::winit::window::ResizeDirection;

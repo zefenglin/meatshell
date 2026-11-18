@@ -638,7 +638,14 @@ export component TerminalView inherits Rectangle {
     // minimum here is dangerous: if the spans fall back to a system font, a
     // mismatched cell-w garbles the grid.  Keep them derived from one source.)
     property <length> cell-w: max(1px, cell-probe.preferred-width / 50);
-    property <length> cell-h: max(1px, cell-probe.preferred-height * root.terminal-line-spacing);
+    // Height of one line of text (the probe's line box at the terminal font
+    // size) — what the glyphs and the cursor are actually drawn at.
+    property <length> cell-text-h: max(1px, cell-probe.preferred-height);
+    // Row pitch: the text line plus the user's line spacing.  The extra room is
+    // split evenly above and below the glyphs (cell-pad-y) so a looser row keeps
+    // the text centred instead of parking it at the top of the row.
+    property <length> cell-h: max(1px, root.cell-text-h * root.terminal-line-spacing);
+    property <length> cell-pad-y: (root.cell-h - root.cell-text-h) / 2;
     // Usable text box = key-capture width minus the 10px left/right padding of
     // output-text; usable height = key-capture height minus the 8px top pad.
     // Measure key-capture, not root: with the SFTP panel docked left/right the
@@ -1000,7 +1007,8 @@ export component TerminalView inherits Rectangle {
                             // layout never re-enters parley's FontContext.
                             if !span.emoji : Text {
                                 x: 0px;
-                                y: 0px;
+                                // Centre the line box in the (possibly taller) row.
+                                y: root.cell-pad-y;
                                 text: span.text;
                                 color: span.fg;
                                 // CJK spans use the CJK-capable UI font: the mono
@@ -1015,9 +1023,9 @@ export component TerminalView inherits Rectangle {
                             }
                             if span.emoji : Image {
                                 x: 0px;
-                                y: 0px;
+                                y: root.cell-pad-y;
                                 width: parent.width;
-                                height: parent.height;
+                                height: root.cell-text-h;
                                 source: span.emoji-image;
                                 image-fit: contain;
                             }
@@ -1026,8 +1034,11 @@ export component TerminalView inherits Rectangle {
                             // fields, login forms) show it too, like PuTTY (#444).
                             if span.underline : Rectangle {
                                 x: 0px;
-                                height: max(1px, floor(root.cell-h / 14px) * 1px);
-                                y: parent.height - self.height - max(1px, floor(root.cell-h / 10px) * 1px);
+                                // Keep the rule just under the glyphs: sized and
+                                // placed from the text line, not the taller row.
+                                height: max(1px, floor(root.cell-text-h / 14px) * 1px);
+                                y: root.cell-pad-y + root.cell-text-h - self.height
+                                    - max(1px, floor(root.cell-text-h / 10px) * 1px);
                                 width: parent.width;
                                 background: span.fg;
                             }
@@ -1041,10 +1052,15 @@ export component TerminalView inherits Rectangle {
                             // shifting it one column in alternate-screen apps put
                             // it after ASCII glyphs and inside wide CJK cells (#319).
                             x: root.cursor-col * root.cell-w;
-                            y: root.cursor-row * root.cell-h
-                                + (root.cursor-style == "underline" ? max(0px, root.cell-h - max(2px, root.cell-h / 8)) : 0px);
+                            // Height of the *text line*, not the row: with a looser
+                            // line spacing the block cursor used to grow to 150% of
+                            // the glyph height while the text stayed the same size.
+                            // It now follows the glyphs, centred in the row.
+                            y: root.cursor-row * root.cell-h + root.cell-pad-y
+                                + (root.cursor-style == "underline"
+                                    ? max(0px, root.cell-text-h - max(2px, root.cell-text-h / 8)) : 0px);
                             width: root.cursor-style == "bar" ? max(2px, root.cell-w / 8) : root.cell-w;
-                            height: root.cursor-style == "underline" ? max(2px, root.cell-h / 8) : root.cell-h;
+                            height: root.cursor-style == "underline" ? max(2px, root.cell-text-h / 8) : root.cell-text-h;
                             background: root.cursor-color;
                             // Blink while focused; show solid (no repaint) when the
                             // window is unfocused so the cursor neither vanishes nor
@@ -1261,7 +1277,7 @@ export component TerminalView inherits Rectangle {
                     ? 10px + max(0, root.cursor-col) * root.cell-w
                     : 0px;
                 y: root.cursor-row >= 0
-                    ? 8px + root.cursor-row * root.cell-h
+                    ? 8px + root.cursor-row * root.cell-h + root.cell-pad-y
                     : 0px;
                 width: 0px;
                 height: 0px;

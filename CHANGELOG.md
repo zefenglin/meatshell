@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-11-18
+
+- **行距变大后，终端文字不再顶在格子上头，光标也保持字高。** 行距原来只把单元格拉高，文字仍贴着格子顶部画，多出来的空当全压在字下面，看起来像没有居中；方块光标的高度也跟着单元格一起被拉长，1.5 倍行距下光标比字高一半。现在多出来的空间上下均分，文字在行内垂直居中；光标（方块与下划线）按字高绘制并跟着文字一起居中，下划线同样贴回字底；行距 100 % 时一切与原来完全一致。
+- **Terminal text is now centred in taller rows, and the cursor keeps the glyph height.** Line spacing used to grow the cell but leave the text pinned to its top, so all the extra space collected under the glyphs and lines looked top-heavy; the block cursor grew with the cell as well, standing half a line taller than the text at 150 %. The extra space is now split evenly above and below, the cursor (block and underline) is drawn at the glyph height and follows the text, and the underline sits back under the baseline; at 100 % spacing nothing changes.
+
 ## [0.8.11] - 2026-11-18
 
 - **命令输入框的选中颜色与终端统一。** 命令编辑器里的文字选中原来是样式默认的"实心主题色 + 白字"，而终端是主题色 40% 透明的一层浅色、文字保持自己的颜色，同一个拖选在两处看起来像两个软件；拖出来的矩形块还额外多一圈描边。现在两处都用终端那套选中色，矩形块也不再画描边。
