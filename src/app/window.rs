@@ -58,6 +58,155 @@ pub(super) fn apply_window_chrome(window: &slint::Window) {
 #[cfg(not(windows))]
 pub(super) fn apply_window_chrome(_window: &slint::Window) {}
 
+/// True on the maximize→restore edge.
+pub(super) fn restored_from_maximized(was_maximized: bool, now_maximized: bool) -> bool {
+    was_maximized && !now_maximized
+}
+
+/// The client rect must cover the window rect exactly. Anything else means the
+/// renderer can still paint from an inset origin, leaving an unpainted strip
+/// along the window edge.
+pub(super) fn frame_needs_realign(
+    dx: i32,
+    dy: i32,
+    client_w: u32,
+    client_h: u32,
+    outer_w: u32,
+    outer_h: u32,
+) -> bool {
+    dx != 0 || dy != 0 || client_w != outer_w || client_h != outer_h
+}
+
+/// A frameless window still carries the `WS_THICKFRAME` resize border, so while
+/// it is maximized the OS inflates the outer rect and insets the client area by
+/// the frame width (7 px at 125 %). Dragging a maximized window back to normal
+/// size can leave that inset behind: the native client rect is correct again but
+/// the Slint surface keeps painting from the maximized offset, which shows up as
+/// an unpainted strip along the window edge (white when a window is behind it).
+/// Recompute the frame and feed the real client size back to Slint so the
+/// surface is recreated at (0, 0).
+#[cfg(windows)]
+pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinPoint {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
+        fn GetClientRect(hwnd: isize, rect: *mut WinRect) -> i32;
+        fn ClientToScreen(hwnd: isize, point: *mut WinPoint) -> i32;
+        fn SetWindowPos(
+            hwnd: isize,
+            after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+    const SWP_NOOWNERZORDER: u32 = 0x0200;
+
+    let measured = window.with_winit_window(|ww| {
+        let handle = ww.window_handle().ok()?;
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return None;
+        };
+        let hwnd = h.hwnd.get();
+        unsafe {
+            let mut outer = WinRect::default();
+            let mut client = WinRect::default();
+            let mut origin = WinPoint::default();
+            if GetWindowRect(hwnd, &mut outer) == 0
+                || GetClientRect(hwnd, &mut client) == 0
+                || ClientToScreen(hwnd, &mut origin) == 0
+            {
+                return None;
+            }
+            let outer_w = (outer.right - outer.left).max(0) as u32;
+            let outer_h = (outer.bottom - outer.top).max(0) as u32;
+            let client_w = (client.right - client.left).max(0) as u32;
+            let client_h = (client.bottom - client.top).max(0) as u32;
+            let dx = origin.x - outer.left;
+            let dy = origin.y - outer.top;
+            tracing::debug!(
+                target: "window_chrome",
+                dx,
+                dy,
+                client_w,
+                client_h,
+                outer_w,
+                outer_h,
+                needs = frame_needs_realign(dx, dy, client_w, client_h, outer_w, outer_h),
+                "measured frameless frame"
+            );
+            let needs = frame_needs_realign(dx, dy, client_w, client_h, outer_w, outer_h);
+            if !needs && !force {
+                return None;
+            }
+            SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_NOZORDER
+                    | SWP_NOOWNERZORDER
+                    | SWP_NOACTIVATE
+                    | SWP_FRAMECHANGED,
+            );
+            let scale = ww.scale_factor().max(0.01) as f64;
+            Some((
+                slint::LogicalSize::new(client_w as f32 / scale as f32, client_h as f32 / scale as f32),
+                dx,
+                dy,
+            ))
+        }
+    });
+    let Some(Some((logical, dx, dy))) = measured else {
+        return false;
+    };
+    tracing::debug!(
+        target: "window_chrome",
+        dx,
+        dy,
+        width = logical.width,
+        height = logical.height,
+        "realigned frameless surface after maximize/restore"
+    );
+    window.dispatch_event(slint::platform::WindowEvent::Resized { size: logical });
+    window.request_redraw();
+    // `SWP_FRAMECHANGED` can drop the Win11 rounded-corner hint.
+    apply_window_chrome(window);
+    true
+}
+
+#[cfg(not(windows))]
+pub(super) fn realign_frameless_surface(_window: &slint::Window, _force: bool) -> bool {
+    false
+}
+
 #[cfg(windows)]
 pub(super) fn setup_windows_platform(renderer_mode: &str) {
     use i_slint_backend_winit::winit::platform::windows::WindowAttributesExtWindows;
@@ -559,6 +708,19 @@ pub(super) fn wire_window_controls(
                 });
                 if let Some(m) = now {
                     w.set_window_maximized(m);
+                    if !m {
+                        // The OS restores the frame asynchronously; re-align the
+                        // render surface once it has settled (white-edge fix).
+                        let weak = w.as_weak();
+                        slint::Timer::single_shot(
+                            std::time::Duration::from_millis(60),
+                            move || {
+                                if let Some(w) = weak.upgrade() {
+                                    realign_frameless_surface(&w.window(), false);
+                                }
+                            },
+                        );
+                    }
                 }
             }
         });

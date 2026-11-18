@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-11-18
+
+- **修复最大化后拖动标题栏还原时的白边。** 无边框窗口从最大化还原后，系统可能仍按最大化时的内边距绘制，窗口边缘会留下一条没画到的竖条（后面是别的窗口时显示为白边）。现在在还原的瞬间重新计算窗口边框，并把真实的客户区尺寸交回渲染层，边缘立即重绘。
+- **Fix the white edge after restoring a maximized window.** When a frameless window was restored by dragging its title bar, the OS could keep the maximized client inset and leave an unpainted strip along the window edge (showing as white when another window was behind it). The frame is now recomputed on the restore edge and the real client size is fed back to the renderer, so the edge repaints immediately.
+
 ## [0.8.4] - 2026-11-18
 
 - **终端新增语法高亮（移植 WindTerm 的 Linux lexer）。** 命令、选项、字符串、IP / MAC 地址、日期时间、数字、权限位，以及错误 / 成功 / 警告 / 提示等关键字，按终端配色方案着色；深色与浅色主题各有一套颜色（取自 dige-black / dige-white 的 scope 配色）。只作用在远端没有自行着色的纯文本上，已有 ANSI 颜色的输出保持原样。提示符行里的命令、选项和路径同样高亮，`<...UP>` 这类标志列表不会再被误判成提示符。

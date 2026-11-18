@@ -60,6 +60,8 @@ pub(super) fn install_window_event_hook(
         let mut focused = true;
         let mut minimized = false;
         let mut occluded = false;
+        // Tracks the maximize→restore edge for the frameless surface re-align.
+        let mut was_maximized = false;
         // Apply the Win11 rounded-corner hint once, on the first event (the HWND
         // reliably exists by then, unlike a pre-run timer) (#166).
         let mut chrome_done = false;
@@ -291,6 +293,18 @@ pub(super) fn install_window_event_hook(
                         // monitors can leave Win11 reporting "maximized" while the
                         // native rectangle/render surface still has the old size.
                         refresh_revealed_main_window(weak.clone());
+                        // A scale change also re-derives the resize frame; when the
+                        // window is not maximized, re-align the surface once the
+                        // new size is in place (white-edge fix).
+                        if let Some(win) = weak.upgrade() {
+                            let maxed = win
+                                .window()
+                                .with_winit_window(|ww| ww.is_maximized())
+                                .unwrap_or(false);
+                            if !maxed {
+                                realign_frameless_surface(&win.window(), false);
+                            }
+                        }
                     }
                     WEvent::Resized(size) => {
                         // A 0-sized resize is how Windows reports a minimize; track it
@@ -307,6 +321,26 @@ pub(super) fn install_window_event_hook(
                                 })
                                 .unwrap_or((false, false));
                             win.set_window_maximized(maxed);
+                            let restored = restored_from_maximized(was_maximized, maxed);
+                            was_maximized = maxed;
+                            if restored {
+                                // Dragging a maximized frameless window back to
+                                // normal size leaves the Slint surface on the old
+                                // client offset until it is explicitly re-aligned;
+                                // otherwise a 7 px strip along the window edge is
+                                // never painted (white when a window is behind it).
+                                for delay in [0u64, 60] {
+                                    let weak = win.as_weak();
+                                    slint::Timer::single_shot(
+                                        std::time::Duration::from_millis(delay),
+                                        move || {
+                                            if let Some(win) = weak.upgrade() {
+                                                realign_frameless_surface(&win.window(), true);
+                                            }
+                                        },
+                                    );
+                                }
+                            }
                             // The OS can leave fullscreen on its own (macOS
                             // green button / gesture): drop the chromeless
                             // terminal-fullscreen layout with it (#495).
