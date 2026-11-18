@@ -85,10 +85,35 @@ export component CommandEditor inherits Rectangle {
     // True while this component is moving the caret itself: the watch below
     // must not read its own bookkeeping as a user move.
     property <bool> syncing-caret: false;
-    // Cell size of the editor font, measured off-screen below. Mouse pixels
-    // become (line, column) through these two.
-    property <length> cell-w: mono-ruler.preferred-width / 10;
-    property <length> line-h: line-ruler.preferred-height / 2;
+    // Cell size of the editor font. The off-screen ruler is only a first
+    // guess: on a scaled display the text engine can measure that Text with a
+    // different size than it draws the text input with, which left the block
+    // rectangle narrower than the text it covered. The caret
+    // positions the text input reports come from the same layout as its
+    // glyphs, so the metrics are calibrated against those (start-calibration).
+    property <length> ruler-cell-w: mono-ruler.preferred-width / 10;
+    property <length> ruler-line-h: line-ruler.preferred-height / 2;
+    // The text input's own extent: a new line changes it, which is when a
+    // measurement that could not run yet (short or empty draft) gets another
+    // chance.
+    property <length> text-extent: edit-input.preferred-height;
+    property <length> cal-cell-w: 0px;
+    property <length> cal-line-h: 0px;
+    property <bool> cal-tried: false;
+    property <int> cal-stage: 0;
+    property <int> cal-count: 0;
+    property <int> cal-save: 0;
+    property <int> cal-retry: 0;
+    // The view is put back where it was: moving the caret to measure would
+    // otherwise scroll the editor to the top and leave it there.
+    property <length> cal-scroll-x: 0px;
+    property <length> cal-scroll-y: 0px;
+    property <length> cal-x0: 0px;
+    property <length> cal-y0: 0px;
+    property <length> caret-x: 0px;
+    property <length> caret-y: 0px;
+    property <length> cell-w: root.cal-cell-w > 1px ? root.cal-cell-w : root.ruler-cell-w;
+    property <length> line-h: root.cal-line-h > 1px ? root.cal-line-h : root.ruler-line-h;
 
     callback send(string, bool /* to every session */);
     // (text, caret byte offset, anchor line, start column, end column, op,
@@ -209,6 +234,91 @@ export component CommandEditor inherits Rectangle {
     function place(line: int, col: int) -> CommandEditResult {
         return root.step(edit-input.text, edit-input.cursor-position-byte-offset,
             line, col, col, 11, "");
+    }
+
+    // --- Font metrics -----------------------------------------------------
+    // Put the caret at the start and at the end of the first line and divide
+    // the distance by the character count: that is the advance the text input
+    // lays its own glyphs out with, at whatever DPI and font actually resolved.
+    // The second line's caret y then gives the row pitch.
+    // The caret is moved one step per poll tick: a move made from inside the
+    // caret callback itself is not re-entered, so the next tick reads the
+    // position the move produced.
+    function start-calibration() {
+        if (!root.active || root.cal-tried || root.cal-stage != 0
+            || edit-input.text == "") {
+            return;
+        }
+        root.cal-tried = true;
+        root.cal-save = edit-input.cursor-position-byte-offset;
+        root.cal-scroll-x = ed-scroll.content-x;
+        root.cal-scroll-y = ed-scroll.content-y;
+        root.syncing-caret = true;
+        root.cal-stage = 1;
+        edit-input.set-selection-offsets(0, 0);
+    }
+
+    function finish-calibration() {
+        root.cal-stage = 0;
+        root.syncing-caret = true;
+        edit-input.set-selection-offsets(root.cal-save, root.cal-save);
+        root.expected-caret = root.cal-save;
+        ed-scroll.content-x = root.cal-scroll-x;
+        ed-scroll.content-y = root.cal-scroll-y;
+        root.syncing-caret = false;
+    }
+
+    function calibration-poll() {
+        if (!root.active) {
+            // Leaving the tab mid-measurement must not leave the caret watch
+            // suppressed.
+            if (root.cal-stage != 0) {
+                root.cal-stage = 0;
+                root.syncing-caret = false;
+            }
+            return;
+        }
+        if (root.cal-stage == 0) {
+            if (!root.cal-tried) {
+                root.start-calibration();
+            } else if (root.cal-cell-w <= 1px) {
+                // The draft was too short to measure: try again about once a
+                // second instead of on every tick.
+                root.cal-retry = root.cal-retry + 1;
+                if (root.cal-retry >= 25) {
+                    root.cal-retry = 0;
+                    root.cal-tried = false;
+                }
+            }
+        } else if (root.cal-stage == 1) {
+            root.cal-x0 = root.caret-x;
+            root.cal-y0 = root.caret-y;
+            let end = root.place(0, 1000000);
+            root.cal-count = end.column;
+            root.cal-stage = 2;
+            edit-input.set-selection-offsets(end.caret, end.caret);
+        } else if (root.cal-stage == 2) {
+            let span = root.caret-x - root.cal-x0;
+            if (root.cal-count >= 2 && span > 1px) {
+                let advance = span / root.cal-count;
+                if (advance > 1px && advance < 100px) {
+                    root.cal-cell-w = advance;
+                }
+            }
+            let second = root.place(1, 0);
+            if (second.lines > 1) {
+                root.cal-stage = 3;
+                edit-input.set-selection-offsets(second.caret, second.caret);
+            } else {
+                root.finish-calibration();
+            }
+        } else if (root.cal-stage == 3) {
+            let pitch = root.caret-y - root.cal-y0;
+            if (pitch > 1px && pitch < 100px) {
+                root.cal-line-h = pitch;
+            }
+            root.finish-calibration();
+        }
     }
 
     function line-at(y: length) -> int {
@@ -493,6 +603,11 @@ export component CommandEditor inherits Rectangle {
                                 ed-scroll.content-y
                                     - (cursor-y - ed-scroll.visible-height + 12px));
                         }
+                        // The text input lays the glyphs out itself: its caret
+                        // positions are the only honest source for the editor's
+                        // font metrics (see start-calibration).
+                        root.caret-x = position.x;
+                        root.caret-y = position.y;
                     }
                     // Remember the modifiers from the key events as well: they
                     // are the fallback on platforms where the OS cannot be
@@ -710,6 +825,9 @@ export component CommandEditor inherits Rectangle {
         triggered => {
             let state = root.poll-input();
             root.rect-mode = !state.supported ? -1 : (state.rect-armed ? 1 : 0);
+            // Metrics can only be measured once there is text to measure; the
+            // ruler stays the fallback until then.
+            root.calibration-poll();
             if (state.supported && !state.button-down) {
                 root.finish-rect();
             }
@@ -725,12 +843,31 @@ export component CommandEditor inherits Rectangle {
     init => {
         if (root.active) {
             edit-input.focus();
+            root.start-calibration();
         }
     }
 
     changed active => {
         if (root.active) {
             edit-input.focus();
+            root.cal-tried = false;
+            root.start-calibration();
+        }
+    }
+
+    // A different font size (or DPI) changes the ruler, so measure again.
+    changed ruler-cell-w => {
+        root.cal-tried = false;
+        root.cal-retry = 0;
+        root.cal-cell-w = 0px;
+        root.cal-line-h = 0px;
+    }
+
+    // A new line means the draft is now long enough to measure.
+    changed text-extent => {
+        if (root.cal-cell-w <= 1px) {
+            root.cal-tried = false;
+            root.cal-retry = 0;
         }
     }
 }

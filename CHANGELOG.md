@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.16] - 2026-11-19
+
+- **矩形框比文字窄、点击行列也偏，都是因为「字宽」是估出来的。** 块的宽高原来取自一段藏在屏幕外的示例文字，用它的宽度除以 10 当作一个字符的宽度。在高 DPI 或被缩放的显示器上，这段示例文字的实际度量与文本框真正绘制文字时用的尺寸并不一致（你机器上大约只有 0.6~0.8 倍），于是 8 列的矩形只盖住 5~6 个字符，右边从字中间切过去，上下也一行行累积偏移；点击换算用的是同一套数字，所以「点哪光标不在哪」也一起偏。现在改成向文本框本身校准：把光标依次放到第一行行首和行尾，用它报告的 x 差值除以字符数得到真实字宽，再用第二行行首的 y 差值得到真实行高，校准后矩形与光标都直接用这套实测值。校准在面板打开时进行，粘贴成多行后会自动重测一次，只移动光标不改变内容，松手后视图滚动位置也原样还原。
+- **Blocks were narrower than their text and clicks landed off-target, because the "character width" was a guess.** The block's width and height came from a sample text hidden off-screen, divided by 10 to make one column. On a scaled or high-DPI display that sample is measured at a different size than the text input actually draws with (about 0.6–0.8× on your machine), so an 8-column block covered only five or six characters, cut the next glyph in half and drifted a little more on every row; the click mapping used the same numbers, which is why the caret often landed elsewhere. The editor now calibrates against the text input itself: the caret is put at the start and the end of the first line and the distance divided by the character count gives the real advance, the second line's caret gives the real row pitch, and both the block and the caret use those measured values. Calibration runs when the panel opens and again after the draft grows to several lines; it only moves the caret (the scroll position is put back).
+
 ## [0.8.15] - 2026-11-18
 
 - **按住 Shift+Alt 单击，直接从光标拉出一个矩形。** 以前只有拖动才能拉出矩形，单击只会得到一个零宽的列光标，所以「光标放在左上角、Shift+Alt 点一下右下角」什么也没有。现在和 Notepad++ 一样：先用普通单击把光标放到起点（这一步由文本框自己精确命中），再按住 Shift+Alt 在终点单击，矩形就从光标一直覆盖到点击处；之后每按一次 Shift+Alt 单击都可以再改另一端，起点不用重新点。判断规则是：按下后移动超过 4px 才算拖动，矩形以按下点为起点；没移动就松开则算单击，矩形以光标为起点。
