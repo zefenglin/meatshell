@@ -871,8 +871,11 @@ msgstr "有选区时复制，否则粘贴；Shift+右键打开菜单。多行粘
 msgid "Saved credential"
 msgstr "已保存的认证"
 
-msgid "This session logs in with the saved credential above. Change its username or password in Settings › Credentials; every session that uses it follows."
-msgstr "此会话使用上面选择的已保存认证登录。在 设置 › 认证管理 中修改用户名或密码，所有使用它的会话都会同步更新。"
+msgid "The saved credential supplies the sign-in method and key or password. Enter a username here to log in as someone else with the same credential; leave it blank to use the credential's username. Settings › Credentials edits the credential itself."
+msgstr "已保存的认证提供登录方式与私钥或密码。在此输入用户名，可用同一凭据以其他用户登录；留空则使用该认证自带的用户名。认证本身请到 设置 › 认证管理 中修改。"
+
+msgid "Blank uses the saved credential's username"
+msgstr "留空则使用该认证自带的用户名"
 
 
 msgid "SSH agent"
@@ -889,3 +892,27 @@ msgstr "默认编辑器"
 
 msgid "Choose program…"
 msgstr "选择程序…"
+
+msgid "Files"
+msgstr "文件"
+
+msgid "Tunnels"
+msgstr "隧道"
+
+msgid "Commands"
+msgstr "命令"
+
+msgid "Column"
+msgstr "列"
+
+msgid " lines"
+msgstr " 行"
+
+msgid "Esc leaves column mode"
+msgstr "Esc 退出列编辑"
+
+msgid "Shift+Alt+drag: column edit"
+msgstr "Shift+Alt 拖拽：列编辑"
+
+msgid "Shift+Enter: new line"
+msgstr "Shift+Enter：换行"

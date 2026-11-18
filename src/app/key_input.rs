@@ -47,6 +47,40 @@ pub(super) fn wire_key_input(
             },
         );
     }
+    // The panel's roomy command editor: Slint owns the draft text, Rust owns
+    // the rules (src/terminal/impls/command_edit.rs). Every meaningful
+    // keystroke arrives as (text, caret, anchor line, start column, end
+    // column, op, typed text) and the answer carries the new text, the caret
+    // offset and the resulting column block.
+    {
+        window.on_command_edit_step(
+            move |text: SharedString,
+                  caret: i32,
+                  anchor: i32,
+                  start_col: i32,
+                  end_col: i32,
+                  op: i32,
+                  typed: SharedString| {
+                let result = crate::terminal::command_edit::apply_rect(
+                    text.as_str(),
+                    caret.max(0) as usize,
+                    anchor,
+                    start_col,
+                    end_col,
+                    op,
+                    typed.as_str(),
+                );
+                CommandEditResult {
+                    text: result.text.into(),
+                    caret: result.caret as i32,
+                    caret_line: result.caret_line,
+                    anchor_line: result.anchor_line,
+                    column: result.column,
+                    column_end: result.column_end,
+                }
+            },
+        );
+    }
     // Copy a history command to the clipboard (#96).
     {
         window.on_copy_text(move |text: SharedString| {

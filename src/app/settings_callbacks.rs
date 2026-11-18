@@ -193,20 +193,6 @@ pub(super) fn wire_interface_toggles(
         });
     }
 
-    // Toolbar toggle: hide/show the quick-command bar (persisted globally).
-    window.set_cmd_bar_hidden(store.borrow().cmd_bar_hidden());
-    {
-        let store = store.clone();
-        let registry = registry.clone();
-        window.on_set_cmd_bar_hidden(move |hidden| {
-            let mut s = store.borrow_mut();
-            s.set_cmd_bar_hidden(hidden);
-            let _ = s.save();
-            drop(s);
-            registry.broadcast_config_changed();
-        });
-    }
-
     // Interface setting: always ask where to save on download (#87). Read live
     // by the download handler from the window property, so just set + persist.
     window.set_download_always_ask(store.borrow().download_always_ask());
@@ -426,8 +412,23 @@ pub(super) fn wire_layout_prefs(ctx: &WinCtx) {
         }
         window.set_collapse_sidebar_default(collapse_sidebar);
         window.set_collapse_sftp_default(collapse_sftp);
-        // Restore the persisted panel docking layout (#dock).
-        window.set_sidebar_width(s.sidebar_width());
+        // Restore the persisted panel docking layout (#dock). Every rail panel
+        // opens at one shared width so switching icons never reshapes the
+        // layout, and the remembered size is the one the user last dragged
+        // (#nav-size).
+        // A width below NAV_MIN_OPEN is a leftover from a fold sweep, not a
+        // size anyone asked for; start such a stored value at the default
+        // (#nav-restore).
+        let stored_nav = s.nav_width();
+        let nav_width = if stored_nav < NAV_MIN_OPEN {
+            NAV_DEFAULT_WIDTH
+        } else {
+            stored_nav
+        };
+        window.set_nav_width(nav_width);
+        window.set_sidebar_width(nav_width);
+        window.set_welcome_sidebar_width(nav_width);
+        window.set_quick_panel_width(nav_width);
         window.set_sidebar_height(s.sidebar_height());
         window.set_sidebar_dock(sidebar_dock.into());
         window.set_sftp_panel_width(s.sftp_panel_width());
@@ -455,11 +456,9 @@ pub(super) fn wire_layout_prefs(ctx: &WinCtx) {
         window.set_quick_commands_as_sidebar(quick_commands_as_sidebar);
         window.set_quick_panel_open(quick_panel_open);
         window.set_quick_panel_collapsed(quick_panel_collapsed);
-        window.set_quick_panel_width(s.quick_panel_width());
         window.set_quick_panel_height(s.quick_panel_height());
         window.set_quick_panel_dock(quick_panel_dock.into());
         window.set_welcome_as_sidebar(welcome_as_sidebar);
-        window.set_welcome_sidebar_width(s.welcome_sidebar_width());
         window.set_welcome_sidebar_dock(welcome_sidebar_dock.into());
         window.set_welcome_collapsed(welcome_collapsed);
         window.set_sidebar_collapsed(sidebar_collapsed);
@@ -542,6 +541,14 @@ pub(super) fn wire_layout_prefs(ctx: &WinCtx) {
         window.on_persist_welcome_sidebar_width(move |w| {
             let mut s = store.borrow_mut();
             s.set_welcome_sidebar_width(w);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_persist_nav_width(move |w| {
+            let mut s = store.borrow_mut();
+            s.set_nav_width(w);
             let _ = s.save();
         });
     }

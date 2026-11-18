@@ -1,4 +1,7 @@
 /target
+/dist
+/.demo
+/.cargo
 Cargo.lock
 *.rs.bk
 .DS_Store

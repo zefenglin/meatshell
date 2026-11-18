@@ -21,8 +21,9 @@ pub struct DockSlotInfo {
 /// Smallest share a panel keeps along the stacking axis (ratio, not px).
 const MIN_RATIO: f32 = 0.08;
 
-/// Visible thickness of a divider between two stacked panels, in px.
-pub const DIVIDER: f32 = 4.0;
+/// Visible thickness of a divider between two stacked panels, in px. Only a
+/// 1px seam is painted; the renderer widens its grab area (ui/app.slint).
+pub const DIVIDER: f32 = 1.0;
 
 /// Clamp bounds for a stacked panel's thickness along its edge's normal
 /// (its width on a left/right edge, height on a top/bottom one).
@@ -30,9 +31,10 @@ pub const MIN_THICK: f32 = 120.0;
 /// Max share of the dock-area an edge stack may take. Kept well under half so
 /// the terminal never fully disappears even with opposite edges both maxed.
 const MAX_THICK_FRAC: f32 = 0.38;
-/// Outer band an edge reserves for the collapsed-panel ToolStrip (a folded
-/// panel still shows its 36px icon strip; stacked panels live inside it).
-pub const STRIP: f32 = 36.0;
+/// Outer band an edge reserves for the collapsed-panel strip (a folded panel
+/// still shows its slim icon strip plus a drag grip; stacked panels live
+/// inside it). Mirrored by `hit_test::GRIP`.
+pub const STRIP: f32 = 28.0;
 
 /// Absolute rectangle in dock-area logical px.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -303,7 +305,7 @@ impl DockStacks {
     /// in logical px. `extent` returns a panel's preferred thickness along its
     /// edge's normal (width on a left/right edge, height on a top/bottom one).
     /// `has_strip` marks edges whose collapsed panels still show the outer
-    /// 36px ToolStrip band: the band stays at the very edge and the whole
+    /// 28px ToolStrip band: the band stays at the very edge and the whole
     /// stack is carved INSIDE it (the band spans the full edge, so the split
     /// axis and ratios are unaffected).
     pub fn compute_geom(
@@ -729,16 +731,16 @@ mod tests {
         s.dock_to("left", "sidebar");
         s.dock_to("left", "quick");
         // Left edge stacks behind its band; the right edge is strip-only
-        // (folded panels, nothing expanded) yet still takes its 36px.
+        // (folded panels, nothing expanded) yet still takes its grip line.
         let strip = |e: &str| e == "left" || e == "right";
         let g = s.compute_geom(&extent_220, &strip, 800.0, 600.0);
         assert_eq!(g.panels.len(), 2);
-        assert_eq!(g.panels[0].rect.x, 36.0);
+        assert_eq!(g.panels[0].rect.x, 28.0);
         // The band runs ALONG the edge: split axis and ratios untouched.
         assert_eq!(g.panels[0].rect.h, 300.0);
         assert_eq!(g.panels[1].rect.y, 300.0);
-        assert_eq!(g.central.x, 256.0);
-        assert_eq!(g.central.w, 800.0 - 256.0 - 36.0);
+        assert_eq!(g.central.x, 248.0);
+        assert_eq!(g.central.w, 800.0 - 248.0 - 28.0);
     }
 
     fn expanded_left_sidebar_welcome(k: &str) -> Option<&'static str> {

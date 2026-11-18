@@ -869,8 +869,11 @@ msgstr "Copy selection, otherwise paste. Shift+right-click opens the menu. Multi
 msgid "Saved credential"
 msgstr "Saved credential"
 
-msgid "This session logs in with the saved credential above. Change its username or password in Settings › Credentials; every session that uses it follows."
-msgstr "This session logs in with the saved credential above. Change its username or password in Settings › Credentials; every session that uses it follows."
+msgid "The saved credential supplies the sign-in method and key or password. Enter a username here to log in as someone else with the same credential; leave it blank to use the credential's username. Settings › Credentials edits the credential itself."
+msgstr "The saved credential supplies the sign-in method and key or password. Enter a username here to log in as someone else with the same credential; leave it blank to use the credential's username. Settings › Credentials edits the credential itself."
+
+msgid "Blank uses the saved credential's username"
+msgstr "Blank uses the saved credential's username"
 
 
 msgid "SSH agent"

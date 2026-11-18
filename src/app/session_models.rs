@@ -565,9 +565,11 @@ pub(super) fn set_dialog_credentials(w: &AppWindow, store: &ConfigStore, selecte
         "None (enter the login below)",
     ))];
     let mut ids = vec![SharedString::new()];
+    let mut users = vec![SharedString::new()];
     for credential in store.credentials() {
         labels.push(format!("{}  ({})", credential.name, credential.summary()).into());
         ids.push(credential.id.clone().into());
+        users.push(credential.user.clone().into());
     }
     let index = ids
         .iter()
@@ -575,6 +577,7 @@ pub(super) fn set_dialog_credentials(w: &AppWindow, store: &ConfigStore, selecte
         .unwrap_or(0);
     w.set_credential_choices(ModelRc::from(Rc::new(VecModel::from(labels))));
     w.set_credential_ids(ModelRc::from(Rc::new(VecModel::from(ids))));
+    w.set_credential_users(ModelRc::from(Rc::new(VecModel::from(users))));
     w.set_dialog_credential_index(index as i32);
     w.set_dialog_credential_id(if index == 0 { "".into() } else { selected.into() });
 }

@@ -254,9 +254,9 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 /// marks the migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
     ConfigFile {
-        wallpaper: "builtin:ms".to_string(),
+        wallpaper: String::new(),
         welcome_as_sidebar: true,
-        sidebar_dock: "right".to_string(),
+        sidebar_dock: "left".to_string(),
         wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
         defaults_rev: DEFAULTS_REV,
         ..ConfigFile::default()
@@ -304,6 +304,20 @@ fn migrate_defaults(cfg: &mut ConfigFile) -> bool {
         && (cfg.wallpaper_overlay - PREVIOUS_DEFAULT_WALLPAPER_OVERLAY).abs() < 0.005
     {
         cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
+    }
+    // rev 4: the resource/status panel docks left by default, the dark theme is
+    // the default look, and the built-in wallpaper starts off. Only values still
+    // sitting on the previous defaults are rewritten, so deliberate choices win.
+    if cfg.defaults_rev < 4 {
+        if cfg.sidebar_dock.trim() == "right" {
+            cfg.sidebar_dock = "left".to_string();
+        }
+        if cfg.wallpaper == "builtin:ms" {
+            cfg.wallpaper = String::new();
+        }
+        if cfg.theme_pref.trim().is_empty() || cfg.theme_pref.trim() == "system" {
+            cfg.theme_pref = "dark".to_string();
+        }
     }
     cfg.defaults_rev = DEFAULTS_REV;
     true
@@ -816,10 +830,25 @@ impl ConfigStore {
             credential.private_key_path.clear();
             credential.private_key_inline = Secret::default();
         }
-        if let Some(existing) = self.cache.credentials.iter_mut().find(|c| c.id == credential.id) {
+        // Sessions that still carry the credential's previous username are
+        // following it rather than overriding it: blank them so the new name
+        // lands. A session with any other name keeps it (one key, many logins).
+        let id = credential.id.clone();
+        let previous_user = self
+            .credential(&id)
+            .map(|c| c.user.trim().to_string())
+            .unwrap_or_default();
+        if let Some(existing) = self.cache.credentials.iter_mut().find(|c| c.id == id) {
             *existing = credential;
         } else {
             self.cache.credentials.push(credential);
+        }
+        if !previous_user.is_empty() {
+            for session in &mut self.cache.sessions {
+                if session.credential_id == id && session.user.trim() == previous_user {
+                    session.user.clear();
+                }
+            }
         }
         Self::apply_all_credentials(&mut self.cache);
         true
@@ -857,10 +886,10 @@ impl ConfigStore {
         self.cache.language = lang;
     }
 
-    /// Theme preference: "system" (default) | "dark" | "light".
+    /// Theme preference: "dark" (default) | "light" | "system".
     pub fn theme_pref(&self) -> &str {
         if self.cache.theme_pref.is_empty() {
-            "system"
+            "dark"
         } else {
             &self.cache.theme_pref
         }
@@ -1196,15 +1225,6 @@ impl ConfigStore {
         self.cache.sftp_no_follow_cd = !follow;
     }
 
-    /// Whether the quick-command bar under the terminal is hidden.
-    pub fn cmd_bar_hidden(&self) -> bool {
-        self.cache.hide_cmd_bar
-    }
-
-    pub fn set_cmd_bar_hidden(&mut self, hidden: bool) {
-        self.cache.hide_cmd_bar = hidden;
-    }
-
     /// Saved quick commands (#55).
     pub fn quick_commands(&self) -> &[QuickCommand] {
         &self.cache.quick_commands
@@ -1315,15 +1335,6 @@ impl ConfigStore {
 
     pub fn set_quick_panel_collapsed(&mut self, collapsed: bool) {
         self.cache.quick_panel_collapsed = collapsed;
-    }
-
-    pub fn quick_panel_width(&self) -> f32 {
-        let width = self.cache.quick_panel_width;
-        if width <= 0.0 {
-            default_quick_panel_width()
-        } else {
-            width
-        }
     }
 
     pub fn set_quick_panel_width(&mut self, width: f32) {
@@ -1451,15 +1462,18 @@ impl ConfigStore {
 
     /// Persisted sidebar width in logical px. Falls back to the default when the
     /// stored value is unset/zero (e.g. a config created via `Default`).
-    pub fn sidebar_width(&self) -> f32 {
-        let w = self.cache.sidebar_width;
-        if w <= 0.0 {
-            default_sidebar_width()
+    /// Shared width of the rail panels (#nav-size).
+    pub fn nav_width(&self) -> f32 {
+        let w = self.cache.nav_width;
+        if w.is_finite() && w >= 120.0 {
+            w.clamp(120.0, 640.0)
         } else {
-            w
+            default_nav_width()
         }
     }
-
+    pub fn set_nav_width(&mut self, v: f32) {
+        self.cache.nav_width = v;
+    }
     pub fn set_sidebar_width(&mut self, v: f32) {
         self.cache.sidebar_width = v;
     }
@@ -1500,14 +1514,6 @@ impl ConfigStore {
     }
     pub fn set_welcome_as_sidebar(&mut self, v: bool) {
         self.cache.welcome_as_sidebar = v;
-    }
-    pub fn welcome_sidebar_width(&self) -> f32 {
-        let w = self.cache.welcome_sidebar_width;
-        if w <= 0.0 {
-            240.0
-        } else {
-            w
-        }
     }
     pub fn set_welcome_sidebar_width(&mut self, v: f32) {
         self.cache.welcome_sidebar_width = v;
@@ -1852,12 +1858,10 @@ impl ConfigStore {
         out
     }
     pub fn sftp_dock(&self) -> String {
-        let d = self.cache.sftp_dock.trim();
-        if d.is_empty() {
-            "bottom".into()
-        } else {
-            d.to_string()
-        }
+        // The files/commands/tunnels module is pinned to the bottom edge (#pin):
+        // it is part of the window frame now, so a stored left/right/top dock is
+        // ignored on load and by every geometry query.
+        "bottom".into()
     }
     pub fn set_sftp_dock(&mut self, v: String) {
         self.cache.sftp_dock = v;
@@ -2981,6 +2985,7 @@ mod tests {
         for host in ["10.0.0.1", "10.0.0.2"] {
             let session = Session {
                 host: host.into(),
+                user: String::new(),
                 credential_id: id.clone(),
                 ..Session::new_empty()
             };

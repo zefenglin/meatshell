@@ -1,0 +1,563 @@
+import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+
+// Outcome of one command-editor operation. Rust owns the rules
+// (src/terminal/impls/command_edit.rs): it gets the text, the caret byte
+// offset and the column block, and hands back the new text plus where the
+// caret goes. Keeping the state in one place is what makes multi-line editing
+// survive unicode, joins and undo-free backspacing.
+export struct CommandEditResult {
+    text: string,
+    caret: int,          // byte offset into text
+    caret-line: int,     // 0-based line of the caret
+    anchor-line: int,    // 0-based fixed end of the block, -1 = column mode off
+    column: int,         // 0-based character column where the block starts
+    column-end: int,     // 0-based character column just past the block
+}
+
+// The large command editor that lives in the file-transfer panel's Command
+// tab. It has multi-line column editing: a keyboard block (Ctrl/Alt+Shift+↑↓)
+// and a rectangle dragged with the mouse, both following Notepad++.
+export component CommandEditor inherits Rectangle {
+    // True while the Command tab is the visible panel mode: only then does the
+    // editor grab the keyboard.
+    in property <bool> active: false;
+    // The draft. Owned here so switching panel tabs keeps the text; the panel
+    // keeps the component alive while the session lives.
+    in-out property <string> buffer;
+    in property <bool> can-send: true;
+    in-out property <bool> send-to-all: false;
+    // Runtime column-mode state: the fixed end of the block plus the caret
+    // line it started from (the badge counts the lines in between).
+    in-out property <int> column-anchor: -1;
+    in-out property <int> column-caret-line: 0;
+    in-out property <int> column-index: 0;
+    // The rectangle dragged with the mouse, in character columns; -1 means the
+    // selection is not a rectangle (plain text selection or a bare caret).
+    in-out property <int> sel-start-col: -1;
+    in-out property <int> sel-end-col: -1;
+    // Where the mouse drag started, so the rectangle can be dragged from any
+    // corner.
+    property <int> drag-line: 0;
+    property <int> drag-col: 0;
+    // Where the last click landed. A Shift+Alt move (or a second Shift+Alt
+    // press) turns that plain click into the fixed corner of a rectangle, so a
+    // block can be started at the very front of one line and finished at the
+    // end of another.
+    property <int> click-line: -1;
+    property <int> click-col: -1;
+    // Modifier state as seen by the last key event. A rectangle needs both
+    // Shift and Alt held: a plain drag selects text the way the widget does.
+    property <bool> mod-shift: false;
+    property <bool> mod-alt: false;
+    // Cell size of the editor font, measured off-screen below. Mouse pixels
+    // become (line, column) through these two.
+    property <length> cell-w: mono-ruler.preferred-width / 10;
+    property <length> line-h: line-ruler.preferred-height / 2;
+
+    callback send(string, bool /* to every session */);
+    // (text, caret byte offset, anchor line, start column, end column, op,
+    // typed text) -> new state. Negative columns mean "take it from the caret".
+    callback step(string, int, int, int, int, int, string) -> CommandEditResult;
+
+    function is-typed-text(e: KeyEvent) -> bool {
+        return !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta
+            && e.text != ""
+            && e.text != Key.Return && e.text != Key.Escape && e.text != Key.Tab
+            && e.text != Key.Backtab && e.text != Key.UpArrow
+            && e.text != Key.DownArrow && e.text != Key.Home
+            && e.text != Key.PageUp && e.text != Key.PageDown
+            && e.text != Key.Delete && e.text != Key.Backspace
+            && e.text != Key.End && e.text != Key.LeftArrow
+            && e.text != Key.RightArrow;
+    }
+
+    // Push one operation through Rust and write the result back. The caret is
+    // re-seeded through set-selection-offsets so the widget never re-derives
+    // the column on its own.
+    function apply-step(op: int, typed: string) {
+        let result = root.step(edit-input.text, edit-input.cursor-position-byte-offset,
+            root.column-anchor, root.sel-start-col, root.sel-end-col, op, typed);
+        root.column-anchor = result.anchor-line;
+        root.column-caret-line = result.caret-line;
+        root.column-index = result.column;
+        // A block stays alive after the edit: Rust collapses the rectangle onto
+        // its caret column, and a zero-width block is what draws one caret per
+        // line, so the next keystroke still reaches every line of the block.
+        if (result.anchor-line >= 0) {
+            root.sel-start-col = result.column;
+            root.sel-end-col = max(result.column, result.column-end);
+        } else {
+            root.sel-start-col = -1;
+            root.sel-end-col = -1;
+        }
+        edit-input.text = result.text;
+        edit-input.set-selection-offsets(result.caret, result.caret);
+    }
+
+    function block-lines() -> int {
+        return abs(root.column-caret-line - root.column-anchor) + 1;
+    }
+
+    // --- Mouse -> (line, column) ------------------------------------------
+    // Only a query: Rust answers with the byte offset of that spot and leaves
+    // the text alone, which is what lets the mouse place the caret exactly.
+    function byte-at(line: int, col: int) -> int {
+        return root.step(edit-input.text, edit-input.cursor-position-byte-offset,
+            line, col, col, 11, "").caret;
+    }
+
+    function line-at(y: length) -> int {
+        // y is relative to the visible viewport; add the scroll offset to get
+        // back into content, then subtract the text input's own origin.
+        return max(0, floor((y + ed-scroll.content-y - 8px) / root.line-h));
+    }
+
+    function col-at(x: length) -> int {
+        return max(0, round((x - 8px) / root.cell-w));
+    }
+
+    // Plain drag: drop the block and let the text input own the selection, so
+    // dragging across lines is an ordinary character selection.
+    function begin-caret(x: length, y: length) {
+        edit-input.focus();
+        root.drag-line = root.line-at(y);
+        root.drag-col = root.col-at(x);
+        root.click-line = root.drag-line;
+        root.click-col = root.drag-col;
+        root.column-anchor = -1;
+        root.column-index = root.drag-col;
+        root.sel-start-col = -1;
+        root.sel-end-col = -1;
+        let at = root.byte-at(root.drag-line, root.drag-col);
+        edit-input.set-selection-offsets(at, at);
+    }
+
+    function extend-caret(x: length, y: length) {
+        let line = root.line-at(y);
+        let col = root.col-at(x);
+        edit-input.set-selection-offsets(
+            root.byte-at(root.drag-line, root.drag-col), root.byte-at(line, col));
+    }
+
+    // Shift+Alt drag: a character rectangle. A press without any horizontal
+    // movement is a zero-width block instead, i.e. a caret on every line at
+    // that column, which is how typing inserts before a character.
+    function begin-rect(x: length, y: length) {
+        edit-input.focus();
+        root.drag-line = root.line-at(y);
+        root.drag-col = root.col-at(x);
+        root.click-line = root.drag-line;
+        root.click-col = root.drag-col;
+        root.sel-start-col = root.drag-col;
+        root.sel-end-col = root.drag-col;
+        root.column-anchor = root.drag-line;
+        root.column-caret-line = root.drag-line;
+        root.column-index = root.drag-col;
+        let at = root.byte-at(root.drag-line, root.drag-col);
+        edit-input.set-selection-offsets(at, at);
+    }
+
+    function extend-rect(x: length, y: length) {
+        let line = root.line-at(y);
+        let col = root.col-at(x);
+        if (col == root.click-col) {
+            root.sel-start-col = root.click-col;
+            root.sel-end-col = root.click-col;
+        } else {
+            root.sel-start-col = min(root.click-col, col);
+            root.sel-end-col = max(root.click-col, col) + 1;
+        }
+        root.column-anchor = root.click-line;
+        root.column-caret-line = line;
+        root.column-index = root.sel-start-col;
+        let at = root.byte-at(line, col);
+        edit-input.set-selection-offsets(at, at);
+    }
+
+    background: Theme.bg-panel-alt;
+
+    VerticalLayout {
+        spacing: 0;
+
+        // --- Header: the three actions on the left, column state right -----
+        // Send comes first so the primary action sits at the very left; the
+        // old footer (keys hint + same three buttons) is merged in here.
+        Rectangle {
+            height: 34px;
+            background: Theme.bg-panel-alt;
+            HorizontalLayout {
+                // 6px top/bottom padding centres the 22px chips in the 34px
+                // strip; without it the layout pins them to its top edge.
+                padding-top: 6px;
+                padding-bottom: 6px;
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 6px;
+                // Primary action: filled chip, a half-step darker edge so it
+                // still reads as a button against the panel.
+                Rectangle {
+                    height: 22px;
+                    border-radius: Theme.radius-md;
+                    background: send-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                    border-width: 1px;
+                    border-color: send-ta.has-hover ? Theme.accent-hover : Theme.accent-pressed;
+                    send-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if (root.can-send && edit-input.text != "") {
+                                root.send(edit-input.text, root.send-to-all);
+                                edit-input.text = "";
+                                root.column-anchor = -1;
+                                root.sel-start-col = -1;
+                                root.sel-end-col = -1;
+                            }
+                            edit-input.focus();
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        Text {
+                            text: @tr("Send");
+                            color: #ffffff;
+                            font-size: Theme.fs-xs;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                // Secondary chips: panel-coloured fill plus a real border, so
+                // every button has an edge even when the cursor is elsewhere.
+                Rectangle {
+                    height: 22px;
+                    border-radius: Theme.radius-md;
+                    background: clear-ta.has-hover ? Theme.bg-hover : Theme.bg-panel;
+                    border-width: 1px;
+                    border-color: clear-ta.has-hover ? Theme.accent : Theme.border-strong;
+                    clear-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            edit-input.text = "";
+                            root.column-anchor = -1;
+                            root.sel-start-col = -1;
+                            root.sel-end-col = -1;
+                            edit-input.focus();
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        Text {
+                            text: @tr("Clear");
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-xs;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 22px;
+                    border-radius: Theme.radius-md;
+                    background: root.send-to-all
+                        ? Theme.accent.with-alpha(0.12)
+                        : (all-ta.has-hover ? Theme.bg-hover : Theme.bg-panel);
+                    border-width: 1px;
+                    border-color: root.send-to-all || all-ta.has-hover
+                        ? Theme.accent
+                        : Theme.border-strong;
+                    all-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.send-to-all = !root.send-to-all;
+                            edit-input.focus();
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 4px;
+                        Text {
+                            text: @tr("All sessions");
+                            color: root.send-to-all ? Theme.accent : Theme.text-secondary;
+                            font-size: Theme.fs-xs;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                if root.column-anchor >= 0 : Rectangle {
+                    height: 18px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.accent;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        Text {
+                            text: @tr("Column") + " " + (root.column-index + 1)
+                                + (root.sel-start-col >= 0 && root.sel-end-col > root.sel-start-col + 1
+                                    ? "-" + root.sel-end-col : "")
+                                + "  ·  " + root.block-lines() + @tr(" lines");
+                            color: #ffffff;
+                            font-size: Theme.fs-xs;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+
+        // --- Editor --------------------------------------------------------
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.bg-root;
+            clip: true;
+
+            // Off-screen rulers: the exact advance of one character and the
+            // exact line advance of the editor font. Everything the mouse does
+            // is measured against them, so no font metric is hard-coded.
+            mono-ruler := Text {
+                x: -10000px;
+                y: -10000px;
+                text: "0000000000";
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-md;
+            }
+            line-ruler := Text {
+                x: -10000px;
+                y: -10000px;
+                text: "0\n0";
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-md;
+            }
+
+            // TextInput swallows the wheel while it owns the pointer, so the
+            // scroll view needs a catcher behind it.
+            TouchArea {
+                scroll-event(event) => {
+                    ed-scroll.content-y = clamp(
+                        ed-scroll.content-y + event.delta-y,
+                        min(0px, ed-scroll.visible-height - ed-scroll.content-height),
+                        0px);
+                    accept
+                }
+                clicked => { edit-input.focus(); }
+            }
+
+            // The ScrollView must be pinned to the editor rect: left to its
+            // preferred size it reports the content height as its own, which
+            // makes this page overflow its slot and pushes the footer row out of
+            // the panel whenever the panel is short (#layout).
+            ed-scroll := ScrollView {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                content-width: max(self.visible-width, edit-input.preferred-width + 16px);
+                content-height: max(self.visible-height, edit-input.preferred-height + 16px);
+                edit-input := TextInput {
+                    x: 8px;
+                    y: 8px;
+                    width: max(1px, ed-scroll.visible-width - 16px);
+                    height: max(ed-scroll.visible-height - 16px, self.preferred-height);
+                    single-line: false;
+                    // No wrapping: a wrapped line has two screen rows but one
+                    // character line, and column editing is displayed by rows.
+                    // Long commands scroll sideways instead.
+                    wrap: no-wrap;
+                    text <=> root.buffer;
+                    color: Theme.text-primary;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-md;
+                    selection-background-color: Theme.accent;
+                    selection-foreground-color: #ffffff;
+                    page-height: ed-scroll.visible-height;
+                    cursor-position-changed(position) => {
+                        let cursor-y = position.y + self.y + ed-scroll.content-y;
+                        if (cursor-y < 12px) {
+                            ed-scroll.content-y = min(0px, ed-scroll.content-y + 12px - cursor-y);
+                        } else if (cursor-y > ed-scroll.visible-height - 12px) {
+                            ed-scroll.content-y = max(
+                                min(0px, ed-scroll.visible-height - ed-scroll.content-height),
+                                ed-scroll.content-y
+                                    - (cursor-y - ed-scroll.visible-height + 12px));
+                        }
+                    }
+                    // Shift+Alt turns a drag into a rectangle; remember the
+                    // modifiers from the key events because the pointer event
+                    // carries none.
+                    key-released(e) => {
+                        root.mod-shift = e.modifiers.shift;
+                        root.mod-alt = e.modifiers.alt;
+                        accept
+                    }
+                    key-pressed(e) => {
+                        root.mod-shift = e.modifiers.shift;
+                        root.mod-alt = e.modifiers.alt;
+                        // Ctrl+A is an ordinary select-all: drop the block first,
+                        // otherwise Delete would still go through the rectangle
+                        // path and only touch the block's columns.
+                        if (e.modifiers.control
+                            && (e.text == "a" || e.text == "A")) {
+                            root.column-anchor = -1;
+                            root.sel-start-col = -1;
+                            root.sel-end-col = -1;
+                            root.click-line = -1;
+                            root.click-col = -1;
+                            edit-input.select-all();
+                            return accept;
+                        }
+                        // Ctrl/Alt+Shift+Arrows build the column block: Down/Up
+                        // pick the lines, Left/Right move the column once it
+                        // exists. Both chords are accepted because Windows
+                        // eats Alt+Arrow for the system menu on some setups.
+                        if ((e.modifiers.alt || e.modifiers.control) && e.modifiers.shift) {
+                            if (e.text == Key.DownArrow) { root.apply-step(0, ""); return accept; }
+                            if (e.text == Key.UpArrow) { root.apply-step(1, ""); return accept; }
+                            if (e.text == Key.LeftArrow && root.column-anchor >= 0) {
+                                root.apply-step(4, ""); return accept;
+                            }
+                            if (e.text == Key.RightArrow && root.column-anchor >= 0) {
+                                root.apply-step(5, ""); return accept;
+                            }
+                        }
+                        if (root.column-anchor >= 0) {
+                            if (e.text == Key.Escape) { root.apply-step(9, ""); return accept; }
+                            if (e.text == Key.Backspace) { root.apply-step(7, ""); return accept; }
+                            if (e.text == Key.Delete) { root.apply-step(8, ""); return accept; }
+                            if (e.text == Key.DownArrow) { root.apply-step(2, ""); return accept; }
+                            if (e.text == Key.UpArrow) { root.apply-step(3, ""); return accept; }
+                            // Left/Right walk the block's column instead of
+                            // inserting the arrow's private-use character.
+                            if (e.text == Key.LeftArrow) { root.apply-step(4, ""); return accept; }
+                            if (e.text == Key.RightArrow) { root.apply-step(5, ""); return accept; }
+                            // Everything printable lands on every line of the
+                            // block at the same character column.
+                            if (root.is-typed-text(e)) {
+                                root.apply-step(6, e.text);
+                                return accept;
+                            }
+                        }
+                        // Enter sends, Shift+Enter opens a new line.
+                        if (e.text == Key.Return) {
+                            if (e.modifiers.shift) {
+                                root.apply-step(10, "");
+                                return accept;
+                            }
+                            if (root.can-send && self.text != "") {
+                                root.send(self.text, root.send-to-all);
+                                self.text = "";
+                                root.column-anchor = -1;
+                                root.sel-start-col = -1;
+                                root.sel-end-col = -1;
+                            }
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+            }
+
+            // --- Rectangle highlight --------------------------------------
+            // One solid block, like Notepad++: character columns on every line
+            // of the block, drawn over the text.
+            if root.sel-start-col >= 0 && root.sel-end-col > root.sel-start-col : Rectangle {
+                x: 8px + root.sel-start-col * root.cell-w;
+                y: 8px + ed-scroll.content-y
+                    + min(root.column-anchor, root.column-caret-line) * root.line-h;
+                width: max(1px, (root.sel-end-col - root.sel-start-col) * root.cell-w);
+                height: root.block-lines() * root.line-h;
+                background: Theme.accent.with-alpha(0.30);
+                border-color: Theme.accent;
+                border-width: 1px;
+            }
+
+            // --- Carets of a collapsed block -------------------------------
+            // A rectangle collapses onto its column after an edit; every line it
+            // covered keeps a caret, so the next keystroke is still understood
+            // as "insert at this column on all of these lines".
+            if root.column-anchor >= 0 && root.sel-end-col <= root.sel-start-col : Rectangle {
+                x: 8px + root.sel-start-col * root.cell-w;
+                y: 8px + ed-scroll.content-y
+                    + min(root.column-anchor, root.column-caret-line) * root.line-h;
+                width: 2px;
+                height: root.block-lines() * root.line-h;
+                background: transparent;
+                for caret[i] in 64 : Rectangle {
+                    visible: i < root.block-lines();
+                    x: 0px;
+                    y: i * root.line-h + 1px;
+                    width: 2px;
+                    height: max(1px, root.line-h - 3px);
+                    background: Theme.accent;
+                }
+            }
+
+            // --- Mouse layer ----------------------------------------------
+            // The text input maps pixels to bytes through the renderer; a
+            // rectangle needs characters, so the mouse is handled here and
+            // Rust says where each (line, column) lives. The 12px on the right
+            // leaves the scrollbar usable. Without Shift+Alt this layer behaves
+            // like the widget: click places the caret, drag selects characters.
+            drag-layer := TouchArea {
+                x: 0;
+                y: 0;
+                width: max(1px, ed-scroll.visible-width - 12px);
+                height: ed-scroll.visible-height;
+                mouse-cursor: text;
+                scroll-event(event) => {
+                    ed-scroll.content-y = clamp(
+                        ed-scroll.content-y + event.delta-y,
+                        min(0px, ed-scroll.visible-height - ed-scroll.content-height),
+                        0px);
+                    accept
+                }
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left
+                        && event.kind == PointerEventKind.down) {
+                        if (root.mod-shift && root.mod-alt) {
+                            // A plain click that already placed the caret is
+                            // the first corner: pressing Shift+Alt elsewhere
+                            // finishes the rectangle from it.
+                            if (root.column-anchor < 0 && root.click-line >= 0
+                                && (root.drag-line != root.line-at(self.mouse-y)
+                                    || root.drag-col != root.col-at(self.mouse-x))) {
+                                root.extend-rect(self.mouse-x, self.mouse-y);
+                            } else {
+                                root.begin-rect(self.mouse-x, self.mouse-y);
+                            }
+                        } else {
+                            root.begin-caret(self.mouse-x, self.mouse-y);
+                        }
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        if (root.column-anchor >= 0) {
+                            root.extend-rect(self.mouse-x, self.mouse-y);
+                        } else {
+                            root.extend-caret(self.mouse-x, self.mouse-y);
+                        }
+                    } else if (root.mod-shift && root.mod-alt && root.click-line >= 0) {
+                        // Two-step rectangle: click placed one corner, moving
+                        // the pointer with Shift+Alt held drags the other one.
+                        root.extend-rect(self.mouse-x, self.mouse-y);
+                    }
+                }
+            }
+        }
+    }
+
+    init => {
+        if (root.active) {
+            edit-input.focus();
+        }
+    }
+
+    changed active => {
+        if (root.active) {
+            edit-input.focus();
+        }
+    }
+}

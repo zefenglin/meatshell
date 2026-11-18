@@ -2,7 +2,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { SftpPanel, SftpEntry, SftpTreeNode, SftpLocalPlace, TunnelInfo, SftpPathSuggestion } from "sftp_panel.slint";
 import { TabInfo } from "tabs.slint";
-import { DockExpandButton, ToolStrip } from "widgets.slint";
+import { CommandEditResult } from "command_bar.slint";
 
 // Embed the terminal fonts here too so the cell-probe Text below measures
 // with the CORRECT font (the built-in Meatshell Mono), not a system fallback.
@@ -288,6 +288,7 @@ export component TerminalView inherits Rectangle {
     in property <int> focus-sequence;
     in property <string> tab-id;
     in property <string> status-line: @tr("Not connected");
+    in property <string> status-clock: "";     // wall clock shown in the bottom bar
     in property <[TermSpan]> spans;     // coloured runs of the visible screen
     in property <int> cursor-row;       // cursor cell (grid coords)
     in property <int> cursor-col;
@@ -374,6 +375,12 @@ export component TerminalView inherits Rectangle {
     callback persist-sftp-tree-width(length);
     callback toggle-sftp-column(string);
     callback set-sftp-collapsed(bool);
+    // Which body the file-transfer panel shows: "files", "tunnels" or
+    // "commands". Kept per session so each tab remembers its tab.
+    in-out property <string> sftp-panel-mode: "files";
+    // Multi-line command editor (panel's Command tab). The editor keeps its own
+    // draft; Rust only answers edit steps; sending reuses print-command.
+    callback command-step(string, int, int, int, int, int, string) -> CommandEditResult;
 
     // --- SFTP docking (within the terminal area) ---------------------------
     // Which edge of the terminal area the SFTP panel sits on: left|right|top|bottom.
@@ -401,7 +408,9 @@ export component TerminalView inherits Rectangle {
     // (run / copy / delete / recall) keep using the raw history-view strings.
     in property <[string]> history-preview;
     property <bool> send-to-all: false;
-    in property <bool> cmd-bar-hidden: false;  // toolbar toggle hides the whole bar
+    // Legacy quick-command bar: replaced by the docked command editor, kept in
+    // the tree but permanently collapsed.
+    in property <bool> cmd-bar-hidden: true;
     // Effective terminal font size in px: per-session zoom override when > 0,
     // else the window/global size (Theme.term-font-size).
     in property <float> term-font-size-px: Theme.term-font-size / 1px;
@@ -693,50 +702,27 @@ export component TerminalView inherits Rectangle {
     VerticalLayout {
         spacing: 0;
 
-        // --- Status strip ---------------------------------------------------
-        Rectangle {
-            visible: !root.zen-mode;
-            height: root.zen-mode ? 0px : 24px;
-            background: Theme.bg-panel-alt;
-            HorizontalLayout {
-                padding-left: 10px; padding-right: 10px;
-                Text {
-                    text: root.status-line;
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-xs;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-                // Alt-screen indicator only.  IMPORTANT: never put cell-w / cell-h
-                // (a Text's preferred-size) inside another Text's `text` — doing so
-                // makes Slint compute one text layout *inside* another, which
-                // re-enters parley's FontContext RefCell and panics ("already
-                // borrowed").  A plain bool flag is safe.
-                if root.is-alt-screen : Text {
-                    text: "[ALT]";
-                    color: Theme.success;
-                    font-size: Theme.fs-xs;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
         // SFTP docking region — terminal + command-bar (central) on one side,
         // the SFTP panel docked to the chosen edge. Absolute geometry, mirroring
         // the resource-panel dock area in app.slint (#dock).
         dock-region := Rectangle {
         vertical-stretch: 1;
-        // Collapsed → shrink to the 36px ToolStrip icon bar at the docked edge
-        // (M5), click its icon to re-expand. The 4px splitter is gone collapsed.
+        // Collapsed → the panel body is not built at all; the docked edge
+        // keeps a 24px handle strip (a WindTerm-style chrome bar) that the
+        // user can click or drag to pull the panel back open (#layout).
         // Side-docked SFTP needs enough room for its compact action row and a
         // usable path field. Clamp legacy/saved widths below that floor instead
         // of letting Slint squeeze controls out of alignment.
-        property <length> sf-w: root.sftp-collapsed ? 36px
+        property <length> sf-w: root.sftp-collapsed ? 24px
             : root.sftp-horizontal ? max(300px, root.sftp-panel-width)
             : root.sftp-panel-width;
-        property <length> sf-h: root.sftp-collapsed ? 36px : root.sftp-panel-height;
-        property <length> sp: root.sftp-collapsed ? 0px : 4px;
-        // The collapsed bar (sf-h) already reserves the bottom strip now.
+        // Collapsed: side/top docks keep a 24px gripper strip; a bottom dock
+        // folds flush with the bottom status bar, whose top edge becomes the
+        // handle instead (#layout).
+        property <length> sf-h: root.sftp-collapsed
+            ? (root.sftp-dock == "bottom" ? 0px : 24px)
+            : root.sftp-panel-height;
+        property <length> sp: root.sftp-collapsed ? 0px : 1px;
         property <length> bottom-strip-h: 0px;
 
         central := Rectangle {
@@ -1597,8 +1583,11 @@ export component TerminalView inherits Rectangle {
 
         // --- Command bar (#55): quick commands + input box + history ---------
         cmd-bar := Rectangle {
-            visible: !root.cmd-bar-hidden;
-            height: root.cmd-bar-hidden ? 0px : 34px;
+            // The docked command editor (file-transfer panel, Commands tab)
+            // replaced this bar; it stays collapsed so its handlers and the
+            // hit-test geometry keep compiling.
+            visible: false;
+            height: 0px;
             background: Theme.bg-panel-alt;
             border-width: 0;
 
@@ -2324,31 +2313,111 @@ export component TerminalView inherits Rectangle {
             }
         }
 
-        // --- SFTP resize splitter (orientation follows the dock edge) -------
+        // --- SFTP resize splitter / collapsed handle strip -------------------
         Rectangle {
-            visible: root.sftp-available && !root.sftp-collapsed;   // gone when collapsed (like the resource splitter)
-            x: root.sftp-dock == "left"   ? parent.sf-w
-             : root.sftp-dock == "right"  ? parent.width - parent.sf-w - 4px
+            // Stays alive while collapsed: it then becomes a 24px handle strip
+            // that the user can click or drag to pull the panel back open.
+            // A bottom-docked panel folds into the status bar instead, so the
+            // strip disappears entirely (there is no seam left to grab).
+            visible: root.sftp-available
+                && !(root.sftp-collapsed && root.sftp-dock == "bottom");
+            x: root.sftp-dock == "left"   ? (root.sftp-collapsed ? 0px : parent.sf-w)
+             : root.sftp-dock == "right"  ? parent.width - parent.sf-w - (root.sftp-collapsed ? 0px : 1px)
              : 0px;
-            y: root.sftp-dock == "top"    ? parent.sf-h
-             : root.sftp-dock == "bottom" ? parent.height - parent.sf-h - 4px
+            y: root.sftp-dock == "top"    ? (root.sftp-collapsed ? 0px : parent.sf-h)
+             : root.sftp-dock == "bottom" ? parent.height - parent.sf-h - (root.sftp-collapsed ? 0px : 1px)
              : 0px;
-            width:  root.sftp-horizontal ? 4px : parent.width;
-            height: root.sftp-horizontal ? parent.height : 4px;
-            background: divider-ta.has-hover || root.sftp-dragging
-                ? Theme.accent : Theme.border-subtle;
+            width:  root.sftp-horizontal ? (root.sftp-collapsed ? 24px : 1px) : parent.width;
+            height: root.sftp-horizontal ? parent.height : (root.sftp-collapsed ? 24px : 1px);
+            background: root.sftp-collapsed
+                ? (divider-ta.has-hover ? Theme.bg-hover : Theme.bg-panel-alt)
+                : (divider-ta.has-hover || root.sftp-dragging
+                    ? Theme.accent : Theme.border-subtle);
+
+            // Collapsed: instead of a bare 1px seam the slot renders a handle
+            // strip that reads as chrome (flat bar + 1px seam towards the
+            // terminal), so the folded panel stays obvious and easy to pull
+            // back up (#layout).
+            if root.sftp-collapsed : Rectangle {
+                x: 0px; y: 0px;
+                width: parent.width; height: parent.height;
+                Rectangle {
+                    // Seam on the edge the terminal sits on.
+                    x: root.sftp-horizontal && root.sftp-dock == "right" ? parent.width - 1px : 0px;
+                    y: !root.sftp-horizontal && root.sftp-dock == "top" ? parent.height - 1px : 0px;
+                    width:  root.sftp-horizontal ? 1px : parent.width;
+                    height: root.sftp-horizontal ? parent.height : 1px;
+                    background: Theme.border-subtle;
+                }
+                if root.sftp-horizontal : Text {
+                    text: root.sftp-dock == "right" ? "◂" : "▸";
+                    x: 0px; y: 0px;
+                    width: parent.width; height: parent.height;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: Theme.fs-md;
+                    color: divider-ta.has-hover ? Theme.accent : Theme.text-muted;
+                }
+                if !root.sftp-horizontal : HorizontalLayout {
+                    x: 0px; y: 0px;
+                    width: parent.width; height: parent.height;
+                    padding-left: 10px;
+                    padding-right: 12px;
+                    alignment: space-between;
+                    Text {
+                        text: @tr("Files");
+                        vertical-alignment: center;
+                        font-size: Theme.fs-xs;
+                        color: divider-ta.has-hover ? Theme.accent : Theme.text-muted;
+                    }
+                    Text {
+                        text: root.sftp-dock == "top" ? "▾" : "▴";
+                        vertical-alignment: center;
+                        font-size: Theme.fs-md;
+                        color: divider-ta.has-hover ? Theme.accent : Theme.text-muted;
+                    }
+                }
+            }
             divider-ta := TouchArea {
-                // Hit area extends a few px past the thin visual bar so it's easy
-                // to grab without landing on the terminal / SFTP edge.
-                x: root.sftp-horizontal ? -4px : 0px;
-                y: root.sftp-horizontal ? 0px : -4px;
-                width:  root.sftp-horizontal ? 12px : parent.width;
-                height: root.sftp-horizontal ? parent.height : 12px;
-                mouse-cursor: root.sftp-horizontal ? ew-resize : ns-resize;
+                // Whether the panel was already folded when the current press
+                // started. Only a tap that *began* on the folded bar may re-open
+                // it: a drag that folded the panel and is released afterwards must
+                // stay folded (the release used to count as a click and popped the
+                // panel back open — #dock).
+                property <bool> was-collapsed: false;
+                // Expanded: the hit area reaches a few px past the 1px seam so it
+                // is easy to grab. Collapsed: it covers the whole handle strip.
+                x: root.sftp-horizontal ? (root.sftp-collapsed ? 0px : -5px) : 0px;
+                y: root.sftp-horizontal ? 0px : (root.sftp-collapsed ? 0px : -5px);
+                width:  root.sftp-horizontal ? (root.sftp-collapsed ? parent.width : 12px) : parent.width;
+                height: root.sftp-horizontal ? parent.height : (root.sftp-collapsed ? parent.height : 12px);
+                mouse-cursor: root.sftp-collapsed
+                    ? pointer
+                    : (root.sftp-horizontal ? ew-resize : ns-resize);
+                // Collapsed strip: a plain click re-opens the panel at the size
+                // it had before it was folded away.
+                clicked => {
+                    if (root.sftp-collapsed && self.was-collapsed) {
+                        self.was-collapsed = false;
+                        root.sftp-dragging = false;
+                        root.set-sftp-panel-height(root.sftp-saved-height > 60px
+                            ? root.sftp-saved-height : 220px);
+                        root.set-sftp-collapsed(false);
+                    }
+                }
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.down) {
+                        self.was-collapsed = root.sftp-collapsed;
                         root.sftp-dragging = true;
-                        root.set-sftp-collapsed(false);
+                        if (!root.sftp-collapsed) {
+                            // Remember the pre-drag extent so a drag that folds the
+                            // panel away can be undone to the size the user had.
+                            root.set-sftp-saved-height(root.sftp-horizontal
+                                ? root.sftp-panel-width : root.sftp-panel-height);
+                        }
+                        // Collapsed: stay folded until the pointer actually moves
+                        // past the expand threshold below — a plain click on the
+                        // bar must not pop the panel open.
                     } else if (ev.kind == PointerEventKind.up) {
                         root.sftp-dragging = false;
                     }
@@ -2358,21 +2427,54 @@ export component TerminalView inherits Rectangle {
                 // moving-frame / accumulation issues. NOTE: `parent` here is the
                 // thin splitter Rectangle, so refer to `dock-region` explicitly
                 // for the region's size/origin (#dock).
+                // Extent the pointer asks for, before clamping to the usable range.
+                property <length> drag-extent: root.sftp-horizontal
+                    ? (root.sftp-dock == "right"
+                        ? dock-region.width - ((self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x)
+                        : (self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x)
+                    : (root.sftp-dock == "bottom"
+                        ? dock-region.height - ((self.absolute-position.y + self.mouse-y) - dock-region.absolute-position.y)
+                        : (self.absolute-position.y + self.mouse-y) - dock-region.absolute-position.y);
                 moved => {
                     if (root.sftp-dragging) {
                         if (root.sftp-horizontal) {
-                            // Floor matches SftpPanel's compact two-row toolbar;
-                            // narrower widths make the path field and actions unusable.
-                            root.set-sftp-panel-width(clamp(
-                                root.sftp-dock == "right"
-                                    ? dock-region.width - ((self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x)
-                                    : (self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x,
-                                300px, max(310px, dock-region.width - 200px)));
+                            if (root.sftp-collapsed) {
+                                // Dragging out of the folded bar: only pop open
+                                // once the pointer passes the 300px width floor,
+                                // then the regular clamp below keeps following.
+                                if (self.drag-extent > 300px) {
+                                    root.set-sftp-collapsed(false);
+                                }
+                            } else {
+                                // Floor matches SftpPanel's compact two-row toolbar;
+                                // narrower widths make the path field and actions unusable.
+                                root.set-sftp-panel-width(clamp(self.drag-extent,
+                                    300px, max(310px, dock-region.width - 200px)));
+                            }
+                        } else if (root.sftp-collapsed) {
+                            // Folded: an upward drag past the 60px collapse floor
+                            // re-opens the panel and sizes it directly.
+                            if (self.drag-extent > 60px) {
+                                root.set-sftp-collapsed(false);
+                                root.set-sftp-panel-height(clamp(self.drag-extent,
+                                    60px, max(80px, dock-region.height - 80px)));
+                            }
+                        } else if (self.drag-extent <= 14px) {
+                            // Dragged all the way onto the docked edge: fold the
+                            // panel away (same state the toolbar's ▲/▼ button sets).
+                            // Between the 60px floor and this 14px edge the panel
+                            // just parks at the floor, so it only vanishes once the
+                            // pointer really reaches the status bar (#dock).
+                            // Expanding restores the extent the user had before it.
+                            root.sftp-dragging = false;
+                            // This gesture folded the panel: keep the release that
+                            // follows from being read as a click on the bar.
+                            self.was-collapsed = false;
+                            root.set-sftp-panel-height(root.sftp-saved-height > 60px
+                                ? root.sftp-saved-height : 220px);
+                            root.set-sftp-collapsed(true);
                         } else {
-                            root.set-sftp-panel-height(clamp(
-                                root.sftp-dock == "bottom"
-                                    ? dock-region.height - ((self.absolute-position.y + self.mouse-y) - dock-region.absolute-position.y)
-                                    : (self.absolute-position.y + self.mouse-y) - dock-region.absolute-position.y,
+                            root.set-sftp-panel-height(clamp(self.drag-extent,
                                 60px, max(80px, dock-region.height - 80px)));
                         }
                     }
@@ -2381,7 +2483,11 @@ export component TerminalView inherits Rectangle {
         }
 
         // --- SFTP panel — positioned on the docked edge ---------------------
-        if root.sftp-available : SftpPanel {
+        // Collapsed: nothing is built at all — only the 1px splitter grip
+        // below remains. Keeping the full panel alive in the shrunken slot
+        // made its toolbar/page/footer/status rows overflow the strip and
+        // stay visible (#layout).
+        if root.sftp-available && !root.sftp-collapsed : SftpPanel {
             x: root.sftp-dock == "right"  ? parent.width - parent.sf-w : 0px;
             y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
             width:  root.sftp-horizontal ? parent.sf-w : parent.width;
@@ -2411,6 +2517,11 @@ export component TerminalView inherits Rectangle {
                 root.sftp-panel-dragging = false;
             }
             collapsed:     root.sftp-collapsed;
+            panel-mode <=> root.sftp-panel-mode;
+            command-step(text, caret, anchor, start, end, op, typed) => {
+                return root.command-step(text, caret, anchor, start, end, op, typed);
+            }
+            command-send(text, all) => { root.run-command(text, all); }
             current-tab-id: root.tab-id;
             current-path:  root.sftp-path;
             entries:       root.sftp-entries;
@@ -2430,7 +2541,7 @@ export component TerminalView inherits Rectangle {
                     // Re-expand; the panel height was preserved while collapsed.
                     root.set-sftp-collapsed(false);
                 } else {
-                    // Minimise: just collapse. sf-h becomes the 36px bar; the
+                    // Minimise: just collapse. sf-h drops to the 1px grip line; the
                     // panel height is preserved (no 30px poke that would pollute
                     // the global default seeded into new sessions) (M5).
                     root.set-sftp-collapsed(true);
@@ -2556,24 +2667,102 @@ export component TerminalView inherits Rectangle {
             }
         }
 
-        // Collapsed → a ToolStrip icon bar at the docked edge (M5), filling the
-        // 36px slot the panel shrank to; click the icon to re-expand.
-        if root.sftp-collapsed : ToolStrip {
-            x: root.sftp-dock == "right"  ? parent.width - parent.sf-w : 0px;
-            y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
-            width:  root.sftp-horizontal ? parent.sf-w : parent.width;
-            height: root.sftp-horizontal ? parent.height : parent.sf-h;
-            dock-edge: root.sftp-dock;
-            glyph: "\u{E2C7}";   // folder — SFTP
-            tooltip: root.sftp-available ? "SFTP" : @tr("SFTP not available");
-            enabled: root.sftp-available;
-            expand => {
-                if (root.sftp-available) {
-                    root.set-sftp-collapsed(false);
+        }
+        // --- Bottom status bar ----------------------------------------------
+        // Always-on chrome in the WindTerm spirit: live session status on the
+        // left, encoding and wall clock on the right. With the SFTP panel
+        // docked at the bottom and folded away, the bar's top edge doubles as
+        // the grab handle — pull it up to bring the panel back (#layout).
+        Rectangle {
+            visible: !root.zen-mode;
+            height: root.zen-mode ? 0px : 24px;
+            background: Theme.bg-panel-alt;
+            Rectangle {
+                x: 0px; y: 0px;
+                width: parent.width; height: 1px;
+                background: Theme.border-subtle;
+            }
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 12px;
+                Text {
+                    text: root.status-line;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                // Alt-screen indicator.  IMPORTANT: never put cell-w / cell-h
+                // (a Text's preferred-size) inside another Text's `text` — doing so
+                // makes Slint compute one text layout *inside* another, which
+                // re-enters parley's FontContext RefCell and panics ("already
+                // borrowed").  A plain bool flag is safe.
+                if root.is-alt-screen : Text {
+                    text: "[ALT]";
+                    color: Theme.success;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "UTF-8";
+                    color: Theme.text-muted;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.status-clock;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
                 }
             }
-        }
-
+            // Drag handle: the top few pixels of the bar. Only meaningful for a
+            // bottom-docked panel, which folds flush against this bar.
+            if root.sftp-available && root.sftp-dock == "bottom" : status-grip := TouchArea {
+                x: 0px; y: 0px;
+                width: parent.width;
+                height: 8px;
+                mouse-cursor: ns-resize;
+                // 0 at the bar's top edge, positive while the pointer is above it.
+                property <length> pull: 0px - self.mouse-y;
+                // Set once the pull crosses the fold threshold; the rest of the
+                // gesture then resizes the panel under the pointer. A plain tap
+                // is deliberately inert — dragging is the only way in.
+                property <bool> dragged: false;
+                pointer-event(ev) => {
+                    // Only the folded state needs this handle: an open panel is
+                    // resized from its own top splitter.
+                    if (ev.kind == PointerEventKind.down) {
+                        if (root.sftp-collapsed) {
+                            root.sftp-dragging = true;
+                            self.dragged = false;
+                        }
+                    } else if (ev.kind == PointerEventKind.up) {
+                        root.sftp-dragging = false;
+                    }
+                }
+                // 1px highlight on the seam while the handle is hovered, so the
+                // boundary reads as draggable.
+                Rectangle {
+                    x: 0px; y: 0px;
+                    width: parent.width; height: 1px;
+                    background: status-grip.has-hover ? Theme.accent : transparent;
+                }
+                moved => {
+                    if (root.sftp-dragging && root.sftp-collapsed && self.pull > 60px) {
+                        // Crossed the fold threshold: pop the panel open, then
+                        // keep resizing it under the pointer.
+                        root.set-sftp-collapsed(false);
+                        self.dragged = true;
+                    }
+                    if (root.sftp-dragging && self.dragged && !root.sftp-collapsed) {
+                        root.set-sftp-panel-height(clamp(self.pull,
+                            60px, max(80px, dock-region.height - 80px)));
+                    }
+                }
+            }
         }
     }
 }

@@ -988,6 +988,7 @@ impl TermBuffer {
                         runs,
                         self.output_highlight,
                         &self.custom_highlight_rules,
+                        self.is_dark,
                     )
                 };
                 if !runs.is_empty() {
@@ -1043,8 +1044,12 @@ impl TermBuffer {
                 let line = &live[idx - hist_len];
                 (line.0.as_str(), line.1.clone())
             };
-            let runs =
-                highlight_plain_output(runs, self.output_highlight, &self.custom_highlight_rules);
+            let runs = highlight_plain_output(
+                runs,
+                self.output_highlight,
+                &self.custom_highlight_rules,
+                self.is_dark,
+            );
             for hs in &runs {
                 spans.extend(render_term_span(hs, d as i32, self.is_dark));
             }

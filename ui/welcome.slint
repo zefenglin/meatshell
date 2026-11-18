@@ -435,8 +435,10 @@ export component Welcome inherits Rectangle {
     }
 
     VerticalLayout {
-        padding: root.compact ? 12px : 24px;
-        spacing: root.compact ? 12px : 20px;
+        // Compact (docked) mode goes edge to edge: the panel is one module and
+        // its seams are drawn as 1px lines by the dock renderer (#layout).
+        padding: root.compact ? 0px : 24px;
+        spacing: root.compact ? 0px : 20px;
 
         // Header (title + tagline) — pinned to the top at its natural height so
         // it can't grab the stretch space and spread apart (seen on macOS); the
@@ -466,8 +468,9 @@ export component Welcome inherits Rectangle {
         Rectangle {
             vertical-stretch: 1;
             background: Theme.bg-panel;
-            border-radius: Theme.radius-md;
-            border-width: 1px;
+            // The docked panel is bordered by its 1px seams instead of a card (#layout).
+            border-radius: root.compact ? 0px : Theme.radius-md;
+            border-width: root.compact ? 0px : 1px;
             border-color: Theme.border-subtle;
 
             VerticalLayout {
@@ -512,7 +515,10 @@ export component Welcome inherits Rectangle {
                             glyph: "\u{E5CB}";
                             clicked => { root.collapse(); }
                         }
-                        Text {
+                        // Only built while there IS a hint: an empty Text still
+                        // consumes the row spacing, which pushed the collapse
+                        // chevron off the panel edge (#header-parity).
+                        if root.import-hint != "" : Text {
                             text: root.import-hint;
                             color: Theme.text-muted;
                             font-size: Theme.fs-sm;
@@ -524,6 +530,8 @@ export component Welcome inherits Rectangle {
                         }
                     }
                 }
+                // 1px seam under the card header (#layout).
+                Rectangle { height: 1px; background: Theme.border-subtle; }
                 if root.compact : PrimaryButton {
                     text: @tr("+ New session");
                     clicked => { root.new-session(); }
@@ -632,6 +640,8 @@ export component Welcome inherits Rectangle {
                         }
                     }
                 }
+                // 1px seam under the filter row (#layout).
+                Rectangle { height: 1px; background: Theme.border-subtle; }
 
                 if sessions.length == 0 : Rectangle {
                     vertical-stretch: 1;
@@ -675,36 +685,42 @@ export component Welcome inherits Rectangle {
                         // Group header on the first row of each group (#41).
                         // Click anywhere on it to collapse / expand the group.
                         if session.group-header != "" : Rectangle {
+                            // Section band: a tinted, rounded strip separates each
+                            // folder header from the host cards below it (#group-band).
                             height: 26px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.bg-panel-alt;
                             // Right-click popup anchor.
                             property <length> gmx;
                             property <length> gmy;
                             HorizontalLayout {
-                                padding-top: 6px;
-                                padding-left: 4px;
-                                spacing: 4px;
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
                                 // Collapse chevron — shown for every group, empty
                                 // folders included, so they line up and can be
                                 // toggled (an empty group just expands to nothing).
                                 Text {
                                     text: session.collapsed ? "\u{E5CC}" : "\u{E5CF}";
                                     font-family: "Material Icons";
-                                    color: Theme.text-muted;
-                                    font-size: Theme.fs-sm;
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-md;
                                     vertical-alignment: center;
                                 }
                                 Text {
                                     text: "\u{E2C7}";   // folder glyph
                                     font-family: "Material Icons";
-                                    color: Theme.text-muted;
-                                    font-size: Theme.fs-sm;
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-md;
                                     vertical-alignment: center;
                                 }
                                 Text {
                                     text: session.group-header;
-                                    color: Theme.text-muted;
-                                    font-size: Theme.fs-xs;
-                                    font-weight: 700;
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-sm;
+                                    font-weight: 600;
                                     vertical-alignment: center;
                                     horizontal-stretch: 1;       // fill → text stays left
                                     horizontal-alignment: left;

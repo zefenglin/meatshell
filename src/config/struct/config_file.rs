@@ -62,7 +62,7 @@ fn default_wallpaper() -> String {
 }
 
 /// Bump when `migrate_defaults` gains a new one-time default-layout change.
-pub const DEFAULTS_REV: u32 = 3;
+pub const DEFAULTS_REV: u32 = 4;
 
 pub(crate) const PREVIOUS_DEFAULT_WALLPAPER_TRANSPARENCY: f32 = 0.38;
 pub(crate) const PREVIOUS_DEFAULT_WALLPAPER_OVERLAY: f32 =
@@ -72,6 +72,10 @@ pub(crate) const DEFAULT_WALLPAPER_OVERLAY: f32 = 1.0 - DEFAULT_WALLPAPER_TRANSP
 
 pub(crate) fn default_sidebar_width() -> f32 {
     220.0
+}
+/// Shared width of the panels opened from the navigation rail (#nav-size).
+pub(crate) fn default_nav_width() -> f32 {
+    240.0
 }
 pub(crate) fn default_sidebar_height() -> f32 {
     240.0
@@ -199,9 +203,6 @@ pub struct ConfigFile {
     /// preset download dir. Defaults to false (#87).
     #[serde(default)]
     pub download_always_ask: bool,
-    /// Hide the quick-command bar under the terminal. Defaults to false.
-    #[serde(default)]
-    pub hide_cmd_bar: bool,
     /// Stored inverted so multiline paste confirmation remains enabled for
     /// existing configurations unless the user explicitly disables it (#300).
     #[serde(default)]
@@ -273,6 +274,11 @@ pub struct ConfigFile {
     /// Persisted across restarts so the drag-resized width sticks.
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    /// One shared width for the rail panels (sessions, resources, quick
+    /// commands): switching panels must not change the layout, and the last
+    /// drag size is remembered across restarts (#nav-size).
+    #[serde(default = "default_nav_width")]
+    pub nav_width: f32,
     /// Resource-panel docking: size when docked top/bottom, and which edge it is
     /// docked to (left|right|top|bottom). Persisted so the layout sticks (#dock).
     #[serde(default = "default_sidebar_height")]

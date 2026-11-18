@@ -241,7 +241,7 @@ export component Sparkline inherits Rectangle {
 // IDEA-style collapsed tool strip (#v0.5 M5): when a dockable panel is collapsed
 // the host renders this thin bar along the panel's docked edge instead of the
 // panel. It shows the panel's tool icon; clicking re-expands. The host reserves
-// the slot (≈36px) and fills this in; one reusable strip for welcome / resource /
+// the slot (≈28px) and fills this in; one reusable strip for welcome / resource /
 // SFTP so they all collapse the same way.
 export component ToolStrip inherits Rectangle {
     in property <string> dock-edge;   // left | right | top | bottom
@@ -255,6 +255,9 @@ export component ToolStrip inherits Rectangle {
     callback expand();
     callback expand-second();
     callback expand-third();
+    // Drag grip on the inner edge: dragging it outwards reports the pointer's
+    // absolute position so the host can re-expand the folded panel there.
+    callback grip-drag(float /* ax */, float /* ay */);
     property <bool> horizontal: root.dock-edge == "top" || root.dock-edge == "bottom";
 
     background: Theme.bg-panel-alt;
@@ -268,8 +271,8 @@ export component ToolStrip inherits Rectangle {
     }
     // Tool icon, hugging the strip's near corner.
     Rectangle {
-        width: 30px;
-        height: 30px;
+        width: 22px;
+        height: 22px;
         x: root.horizontal ? 4px : (parent.width - self.width) / 2;
         y: root.horizontal ? (parent.height - self.height) / 2 : 4px;
         border-radius: Theme.radius-sm;
@@ -277,7 +280,7 @@ export component ToolStrip inherits Rectangle {
           Text {
               text: root.glyph;
               font-family: "Material Icons";
-              font-size: 18px;
+              font-size: 16px;
               color: !root.enabled ? Theme.text-muted.with-alpha(0.45)
                   : ta.has-hover ? Theme.text-primary : Theme.text-secondary;
             horizontal-alignment: center;
@@ -295,16 +298,16 @@ export component ToolStrip inherits Rectangle {
           }
       }
     if root.show-second : Rectangle {
-        width: 30px;
-        height: 30px;
-        x: root.horizontal ? 38px : (parent.width - self.width) / 2;
-        y: root.horizontal ? (parent.height - self.height) / 2 : 38px;
+        width: 22px;
+        height: 22px;
+        x: root.horizontal ? 30px : (parent.width - self.width) / 2;
+        y: root.horizontal ? (parent.height - self.height) / 2 : 30px;
         border-radius: Theme.radius-sm;
         background: ta2.has-hover ? Theme.bg-hover : transparent;
         Text {
             text: root.second-glyph;
             font-family: "Material Icons";
-            font-size: 18px;
+            font-size: 16px;
             color: ta2.has-hover ? Theme.text-primary : Theme.text-secondary;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -317,16 +320,16 @@ export component ToolStrip inherits Rectangle {
         }
     }
     if root.show-third : Rectangle {
-        width: 30px;
-        height: 30px;
-        x: root.horizontal ? 72px : (parent.width - self.width) / 2;
-        y: root.horizontal ? (parent.height - self.height) / 2 : 72px;
+        width: 22px;
+        height: 22px;
+        x: root.horizontal ? 56px : (parent.width - self.width) / 2;
+        y: root.horizontal ? (parent.height - self.height) / 2 : 56px;
         border-radius: Theme.radius-sm;
         background: ta3.has-hover ? Theme.bg-hover : transparent;
         Text {
             text: root.third-glyph;
             font-family: "Material Icons";
-            font-size: 18px;
+            font-size: 16px;
             color: ta3.has-hover ? Theme.text-primary : Theme.text-secondary;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -336,6 +339,79 @@ export component ToolStrip inherits Rectangle {
         ta3 := TouchArea {
             mouse-cursor: pointer;
             clicked => { root.expand-third(); }
+        }
+    }
+    // Drag grip on the inner (central-facing) edge. It stays on screen while
+    // the panel is folded, so the folded panel can be dragged back out — the
+    // same grab an expanded panel offers on its own in-edge.
+    grip := Rectangle {
+        x: root.dock-edge == "right" ? 0px
+            : root.dock-edge == "left" ? parent.width - self.width : 0px;
+        y: root.dock-edge == "top" ? parent.height - self.height : 0px;
+        width: root.horizontal ? parent.width : 4px;
+        height: root.horizontal ? 4px : parent.height;
+        background: transparent;
+        gta := TouchArea {
+            mouse-cursor: root.horizontal ? ns-resize : ew-resize;
+            moved => {
+                if (self.pressed) {
+                    root.grip-drag((self.absolute-position.x + self.mouse-x) / 1px,
+                                   (self.absolute-position.y + self.mouse-y) / 1px);
+                }
+            }
+        }
+        // Only the innermost pixel is painted (#layout).
+        Rectangle {
+            x: root.dock-edge == "left" ? parent.width - 1px : 0px;
+            y: root.dock-edge == "top" ? parent.height - 1px : 0px;
+            width: root.horizontal ? parent.width : 1px;
+            height: root.horizontal ? 1px : parent.height;
+            background: gta.has-hover ? Theme.accent : Theme.border-subtle;
+        }
+    }
+}
+
+// One icon in the permanent navigation rail (#rail). The rail is a fixed 28px
+// column of these; `active` marks the panel this icon currently shows.
+export component RailButton inherits Rectangle {
+    in property <string> glyph: "";
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 28px;
+    height: 26px;
+    background: root.enabled && (root.active || ta.has-hover)
+        ? (root.active ? Theme.accent.with-alpha(0.14) : Theme.bg-hover)
+        : transparent;
+
+    // Accent slot marking the panel this icon currently shows.
+    Rectangle {
+        x: 0px;
+        y: 5px;
+        width: 2px;
+        height: parent.height - 10px;
+        background: Theme.accent;
+        visible: root.enabled && root.active;
+    }
+    Text {
+        text: root.glyph;
+        font-family: "Material Icons";
+        font-size: 16px;
+        color: !root.enabled ? Theme.text-muted.with-alpha(0.45)
+            : root.active ? Theme.accent
+            : ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+    }
+    ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+            }
         }
     }
 }

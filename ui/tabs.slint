@@ -310,6 +310,13 @@ export component TabBar inherits Rectangle {
     height: 36px;
     background: Theme.bg-panel-alt;
 
+    // 1px seam between the tab row and the panes below (#layout).
+    Rectangle {
+        x: 0px; y: parent.height - 1px;
+        width: parent.width; height: 1px;
+        background: Theme.border-subtle;
+    }
+
     // --- Drag-to-reorder state (#408) --------------------------------------
     // Nothing here touches the model: the slots stay exactly where they are for
     // the whole gesture, which is what keeps the dragged tab's pointer grab (and

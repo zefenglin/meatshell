@@ -1,6 +1,7 @@
 import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 import { TabInfo } from "tabs.slint";
+import { CommandEditor, CommandEditResult } from "command_bar.slint";
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -1390,7 +1391,10 @@ export component SftpPanel inherits Rectangle {
     // The right-clicked row is one of several checked rows: Delete then acts
     // on the whole selection, as in a file manager (#531).
     property <bool>   menu-on-selection: false;
-    property <string> panel-mode: "files";
+    // Which body the panel shows: "files", "tunnels" or "commands". In-out so
+    // the terminal view keeps it per session and the Command editor's draft is
+    // not lost when the user flips back to Files.
+    in-out property <string> panel-mode: "files";
     // Text of the toolbar path fields (wide and compact). The fields live inside
     // conditional layouts, so their ids cannot be reached from the changed
     // handler; the two-way binding keeps every copy in sync, including text set
@@ -1480,6 +1484,15 @@ export component SftpPanel inherits Rectangle {
     callback tunnel-stop(string /* id */);
     callback tunnel-start(string /* id */);
     callback tunnel-delete(string /* id */);
+    // --- Command tab -------------------------------------------------------
+    // The roomy command editor's draft, owned here so switching panel modes
+    // keeps the text.
+    in-out property <string> command-buffer;
+    // One multi-line edit step; see src/terminal/impls/command_edit.rs.
+    callback command-step(string /* text */, int /* caret */, int /* anchor line */,
+        int /* start column */, int /* end column */, int /* op */,
+        string /* typed */) -> CommandEditResult;
+    callback command-send(string /* text */, bool /* to all sessions */);
     // Context-menu extensions (#69). The *-request callbacks open dialogs in
     // the app shell; copy-path goes straight to the system clipboard.
     callback rename-request(string /* path */, string /* current name */);
@@ -1573,7 +1586,7 @@ export component SftpPanel inherits Rectangle {
         root.drag-x = ax - root.absolute-position.x;
         root.drag-y = ay - root.absolute-position.y;
         let top = root.content-top;
-        let bottom = max(top, root.height - 18px);
+        let bottom = max(top, root.height);
         root.drop-local = root.drag-from == "remote"
             && root.drag-x >= 0px && root.drag-x <= root.local-w
             && root.drag-y >= top && root.drag-y <= bottom;
@@ -1583,7 +1596,7 @@ export component SftpPanel inherits Rectangle {
         root.drop-x = root.drop-local ? 0px : root.local-w + 5px;
         root.drop-y = top;
         root.drop-w = root.drop-local ? root.local-w : max(0px, root.width - root.local-w - 5px);
-        root.drop-h = max(0px, root.height - top - 18px);
+        root.drop-h = max(0px, root.height - top);
     }
 
     public function end-drag(ax: length, ay: length) {
@@ -1703,25 +1716,6 @@ export component SftpPanel inherits Rectangle {
         return false;
     }
 
-    // Drag empty space to re-dock; interactive widgets (file list, tree, toolbar
-    // buttons) sit in front and capture their own events (#dock). Move cursor
-    // only while dragging; hovering empty space keeps the arrow (#360).
-    dock-bg := TouchArea {
-        mouse-cursor: self.pressed ? move : default;
-        moved => {
-            if (self.pressed) {
-                root.dock-drag-move(self.absolute-position.x + self.mouse-x,
-                                    self.absolute-position.y + self.mouse-y);
-            }
-        }
-        pointer-event(ev) => {
-            if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-            // Grab taken away (popup, deactivation): end the gesture
-            // anyway so no dock preview is stranded.
-            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
-        }
-    }
-
     // Hidden entirely when side-docked + collapsed: the horizontal toolbar would
     // otherwise squish into an unusable vertical strip. `visible` (not `if`) so
     // the toolbar's own elements (and their handlers) stay alive while it is
@@ -1742,66 +1736,23 @@ export component SftpPanel inherits Rectangle {
 
                 HorizontalLayout {
                 height: 34px;
-                // Pushed the left padding from 6px to 10px so the dock drag grip
-                // sits a bit further from the panel edge and the Files tab no longer
-                // feels crowded against it (#toolbar-shadow-overlap).
+                // Extra left padding keeps the Files tab clear of the panel edge
+                // (#toolbar-shadow-overlap).
                 padding-left: 10px;
                 padding-right: 6px;
                 padding-top: 6px;
                 padding-bottom: 6px;
                 spacing: 4px;
 
-                // Dedicated drag handle to re-dock the panel. The toolbar is full
-                // of controls, so dragging "empty space" is unreliable; this grip
-                // is always grabbable and reports window-space coords (#dock).
-                Rectangle {
-                    width: 16px;
-                    y: (parent.height - self.height) / 2;
-                    height: 22px;
-                    grip-ta := TouchArea {
-                        mouse-cursor: move;
-                        moved => {
-                            if (self.pressed) {
-                                root.dock-drag-move(self.absolute-position.x + self.mouse-x,
-                                                    self.absolute-position.y + self.mouse-y);
-                            }
-                        }
-                        pointer-event(ev) => {
-                            if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-                            // Grab taken away (popup, deactivation): end the
-                            // gesture anyway so no dock preview is stranded.
-                            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
-                        }
-                    }
-                    Text {
-                        text: "\u{E945}";   // drag_indicator
-                        font-family: "Material Icons";
-                        color: grip-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
-                        font-size: 16px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        width: parent.width;
-                        height: parent.height;
-                    }
-                }
-
-                // Small transparent spacer between the dock drag grip and the Files
-                // tab. Without it the grip's hover state visually bleeds into the
-                // tab's background, making the two look like a single overlapping
-                // shape (#toolbar-shadow-overlap).
-                Rectangle {
-                    width: 6px;
-                    height: 22px;
-                    background: transparent;
-                }
-
                 Rectangle {
                     // The split view has no path row, so the toolbar can keep the
                     // tab labels even below the usual compact threshold.
                     width: root.narrow-toolbar && !root.dual ? 28px : 48px;
                     height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: root.panel-mode == "files" ? Theme.accent : (files-tab-ta.has-hover ? Theme.bg-hover : transparent);
+                    border-radius: Theme.radius-md;
+                    background: root.panel-mode == "files" ? Theme.accent : (files-tab-ta.has-hover ? Theme.bg-hover : Theme.bg-panel);
+                    border-width: 1px;
+                    border-color: root.panel-mode == "files" ? Theme.accent-pressed : (files-tab-ta.has-hover ? Theme.accent : Theme.border-strong);
                     files-tab-ta := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.panel-mode = "files"; }
@@ -1815,11 +1766,35 @@ export component SftpPanel inherits Rectangle {
                         vertical-alignment: center;
                     }
                 }
+                // Command tab: the large multi-line editor (single-line bar above
+                // the terminal stays for quick one-liners).
                 Rectangle {
-                    width: root.narrow-toolbar && !root.dual ? 28px : 58px;
+                    width: root.narrow-toolbar && !root.dual ? 28px : 48px;
                     height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: root.panel-mode == "tunnels" ? Theme.accent : (tunnels-tab-ta.has-hover ? Theme.bg-hover : transparent);
+                    border-radius: Theme.radius-md;
+                    background: root.panel-mode == "commands" ? Theme.accent : (commands-tab-ta.has-hover ? Theme.bg-hover : Theme.bg-panel);
+                    border-width: 1px;
+                    border-color: root.panel-mode == "commands" ? Theme.accent-pressed : (commands-tab-ta.has-hover ? Theme.accent : Theme.border-strong);
+                    commands-tab-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.panel-mode = "commands"; }
+                    }
+                    Text {
+                        text: root.narrow-toolbar && !root.dual ? "\u{E86F}" : @tr("Commands");
+                        font-family: root.narrow-toolbar && !root.dual ? "Material Icons" : Theme.ui-font-family;
+                        color: root.panel-mode == "commands" ? #ffffff : Theme.text-secondary;
+                        font-size: Theme.fs-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    width: root.narrow-toolbar && !root.dual ? 28px : 48px;
+                    height: 22px;
+                    border-radius: Theme.radius-md;
+                    background: root.panel-mode == "tunnels" ? Theme.accent : (tunnels-tab-ta.has-hover ? Theme.bg-hover : Theme.bg-panel);
+                    border-width: 1px;
+                    border-color: root.panel-mode == "tunnels" ? Theme.accent-pressed : (tunnels-tab-ta.has-hover ? Theme.accent : Theme.border-strong);
                     tunnels-tab-ta := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.panel-mode = "tunnels"; }
@@ -2241,6 +2216,12 @@ export component SftpPanel inherits Rectangle {
                         }
                     }
                 }
+            }
+            // 1px seam under the toolbar (#layout).
+            Rectangle {
+                x: 0px; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: Theme.border-subtle;
             }
         }
 
@@ -3520,21 +3501,17 @@ export component SftpPanel inherits Rectangle {
             }
         }
 
-        // --- Status bar (full width) --------------------------------------
-        Rectangle {
-            height: 18px;
-            background: Theme.bg-panel-alt;
-            Text {
-                x: 8px;
-                text: root.status;
-                color: Theme.text-muted;
-                font-size: Theme.fs-xs;
-                vertical-alignment: center;
-                height: parent.height;
-                overflow: elide;
-                width: parent.width - 16px;
+        // --- Command tab: large multi-line editor --------------------------
+        if root.panel-mode == "commands" : CommandEditor {
+            vertical-stretch: 1;
+            active: true;
+            buffer <=> root.command-buffer;
+            step(text, caret, anchor, start, end, op, typed) => {
+                return root.command-step(text, caret, anchor, start, end, op, typed);
             }
+            send(text, all) => { root.command-send(text, all); }
         }
+
     }
 
     // --- Split-view drag feedback -----------------------------------------

@@ -1,0 +1,30 @@
+# Line endings: store LF in the repository and check out LF on every platform.
+#
+# Without this file a Windows clone with core.autocrlf unset keeps the CRLF the
+# checkout was converted with, and every tracked file shows up as modified
+# (1180 files / 300k+ lines of pure line-ending noise in git status and git diff).
+# eol=lf pins the working tree to LF so that cannot happen again, and overrides
+# core.autocrlf from either direction.
+* text=auto eol=lf
+
+# Binary assets: never convert line endings in these, never diff them as text.
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.webp     binary
+*.ico      binary
+*.icns     binary
+*.ttf      binary
+*.otf      binary
+*.woff     binary
+*.woff2    binary
+*.pdf      binary
+*.zip      binary
+*.gz       binary
+*.msi      binary
+*.dmg      binary
+*.exe      binary
+*.AppImage binary
+*.ppk      binary
+*.hprof    binary

@@ -8,23 +8,28 @@ FinalShell's core experience (resource-monitor sidebar, session management,
 tabbed terminals) while cutting memory use from the 400 MB+ of a JVM app down to
 the tens-of-MB range of a native binary.
 
+> This repository is a fork of [yituorou/meatshell](https://github.com/yituorou/meatshell)
+> focused on terminal polish and day-to-day ergonomics: WindTerm-style syntax highlighting,
+> a permanent left navigation rail, bottom-pinned Files / Commands / Tunnels panels, and a
+> quieter default look (dark theme, no wallpaper, resource monitor on the left).
+
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/01-welcome-en.png" alt="Welcome / session management" width="800"><br>
-  <em>Welcome page: session management + local resource monitor sidebar</em>
+  <img src="docs/screenshots/01-welcome.png" alt="Quick connect / session management" width="800"><br>
+  <em>Quick connect: session management + embedded terminal</em>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/02-terminal-htop.png" alt="Terminal + SFTP" width="800"><br>
-  <em>Tabbed terminal (full-screen btop) + SFTP file browser + remote resource monitoring</em>
+  <img src="docs/screenshots/02-terminal-sftp.png" alt="Terminal + SFTP + resource monitor" width="800"><br>
+  <em>Tabbed terminal + remote resource monitor on the left + SFTP file browser at the bottom</em>
 </p>
 
 ## Download & install
 
 Every `v*` tag triggers a GitHub Actions build that produces native binaries for
 **Windows / Linux / macOS**, published on the
-[Releases](https://github.com/yituorou/meatshell/releases) page.
+[Releases](../../releases) page of this repository.
 
 ### Windows
 
@@ -92,9 +97,13 @@ open /Applications/meatshell.app
 - [x] Remote process monitor (CPU-sorted table with PID copy and permission-aware termination)
 - [x] Full VT/ANSI terminal emulation (btop / htop / vim render correctly)
 - [x] Color emoji, including skin tones, flags, and ZWJ sequences
+- [x] Terminal syntax highlighting (ported from WindTerm's Linux lexer): commands, options, strings, IP / MAC addresses, dates, numbers and error / success keywords are coloured from the terminal scheme, with separate palettes for dark and light themes
+- [x] Permanent left navigation rail (sessions / resources / quick commands); the three panels share one width and remember the last size you dragged
+- [x] Files / Commands / Tunnels panel pinned to the bottom of the window, collapsible, taking no room when collapsed
 - [x] Tabs (welcome page + multiple sessions)
 - [x] Session management: create / edit / delete / groups, local JSON, export / import (including FinalShell connection files)
-  - Config location: `%APPDATA%/meatshell/sessions.json` (Windows)
+  - Config location (portable first): `config/sessions.json` next to the executable; when that
+    folder is not writable, `%APPDATA%/meatshell/sessions.json` (Windows)
     / `~/.config/meatshell/sessions.json` (Linux)
     / `~/Library/Application Support/meatshell/sessions.json` (macOS)
 - [x] SSH (`russh`, pure Rust): password / private key / encrypted key (passphrase)
@@ -138,9 +147,14 @@ under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See
 cargo run --release
 ```
 
-On first launch an empty session store is created at
-`%APPDATA%/meatshell/sessions.json`. Click **"＋ New Session"** in the top-right
-to add your first server.
+On first launch an empty session store is created in `config/sessions.json` next to the
+executable (or the per-user config directory above when that folder is not writable).
+Click **"＋ New Session"** in the top-right to add your first server.
+
+> On the first portable launch, if the legacy per-user config directory still exists, its
+> sessions, key and `known_hosts` are copied over so upgrades keep working. To start from a
+> clean default state, remove the old directory (`%APPDATA%/meatshell`, `~/.config/meatshell`,
+> …) first.
 
 ## CLI and MCP automation
 

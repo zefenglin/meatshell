@@ -5,6 +5,23 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-18
+
+- **终端新增语法高亮（移植 WindTerm 的 Linux lexer）。** 命令、选项、字符串、IP / MAC 地址、日期时间、数字、权限位，以及错误 / 成功 / 警告 / 提示等关键字，按终端配色方案着色；深色与浅色主题各有一套颜色（取自 dige-black / dige-white 的 scope 配色）。只作用在远端没有自行着色的纯文本上，已有 ANSI 颜色的输出保持原样。提示符行里的命令、选项和路径同样高亮，`<...UP>` 这类标志列表不会再被误判成提示符。
+- **Terminal syntax highlighting (ported from WindTerm's Linux lexer).** Commands, options, strings, IP / MAC addresses, dates, numbers, permission bits and error / success / warning / info keywords are coloured from the terminal scheme, with separate palettes for dark and light themes (scope colours from dige-black / dige-white). Only plain text is recoloured, so output that already has ANSI colours keeps them; prompt lines highlight their command, options and paths too, and flag lists such as `<...UP>` are no longer mistaken for a prompt.
+
+- **常驻左侧导航栏。** 左侧固定三个图标（会话 / 资源 / 快捷命令），同一时刻只展开一个面板；三个面板共用同一宽度，拖动一次后记住大小，从图标重新打开时不会再缩成窄条。
+- **Permanent left navigation rail.** Three icons on the left (sessions / resources / quick commands) open one panel at a time; all three share one width, which is remembered after a drag, so reopening from the rail no longer collapses to a sliver.
+
+- **底部面板固定并清理。** 文件 / 命令 / 隧道面板固定在窗口底部，去掉工具栏的拖动抓手、空区拖动重停靠和 18px 路径状态条；面板收起后底部不再残留把手或 `/home/…` 路径行。命令面板的发送 / 清空 / 所有会话按钮并入表头并居左。
+- **Bottom panel pinned and cleaned up.** Files / Commands / Tunnels stay at the bottom: the toolbar drag grip, drag-to-redock and the 18px path status bar are gone, and a collapsed panel leaves no handle or `/home/…` line behind. The command panel's Send / Clear / All sessions buttons now sit in its header, on the left.
+
+- **默认外观调整。** 新配置默认使用深色主题、无壁纸，运行状态面板停靠在左侧；旧配置在升级时按仍为旧默认值的项迁移一次。
+- **New default look.** Fresh configs start dark, without wallpaper and with the resource monitor docked left; existing configs are migrated once when they still hold the old defaults.
+
+- **文档更正。** README 的配置位置改为便携优先（可执行文件同目录的 `config/`，不可写时回退到用户配置目录），并说明首次便携启动会迁移旧版配置。
+- **Docs fix.** The README now documents the portable-first config location (`config/` next to the executable, falling back to the per-user dir) and the legacy migration on the first portable launch.
+
 ## [0.8.3] - 2026-11-15
 
 - **新增认证管理，多个会话可共用同一套登录信息（#526）。** 设置 › 认证管理 中保存一次用户名和登录方式（密码 / 键盘交互 / 私钥文件及私钥密码，或 SSH Agent），可编辑、删除，并显示每个认证被多少个会话使用。SSH 会话在编辑窗口中选择认证后，自身的登录字段会隐藏并跟随该认证；修改认证会同步到所有使用它的会话，密码和私钥加密保存且只存一份。删除认证时，相关会话各自保留一份登录信息，不会因此无法连接。导出文件保持独立完整，导入时不会关联本机的认证。

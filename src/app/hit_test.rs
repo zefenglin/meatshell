@@ -3,6 +3,17 @@
 use crate::terminal::ScreenDims as _;
 use super::*;
 
+/// Band a folded docked panel still occupies: its icon strip on the dock edge
+/// (mirrors `dock_stacks::STRIP`, which carves that band out of the central
+/// rect). Hit-testing must reserve exactly the same thickness.
+const GRIP: f32 = 28.0;
+
+/// Height of the terminal pane's always-on bottom status bar
+/// (mirrors the 24px bar at the end of `dock-region` in terminal_view.slint).
+/// It sits outside the dock region, so the terminal and a docked SFTP panel
+/// both stop above it.
+pub(super) const STATUS_BAR_H: f32 = 24.0;
+
 /// Width of a left/right-docked SFTP panel as terminal_view.slint lays it out:
 /// never narrower than 300px, whatever width was saved (#505).
 fn side_sftp_width(saved: f32) -> f32 {
@@ -98,20 +109,24 @@ pub(super) fn terminal_wheel_hit(
     let mut term_w = term.w;
     let mut term_h = term.h;
 
-    // Zen mode / terminal fullscreen remove the 24px status strip; the
-    // command bar stays on screen.
+    // Zen mode / terminal fullscreen hide the status bar; the command bar
+    // stays on screen.
     if !panels_hidden(win) {
-        term_y += 24.0;
-        term_h = (term_h - 24.0).max(0.0);
+        // The always-on bottom status bar is the last row of the terminal view,
+        // so the terminal (and a docked panel) both stop above it.
+        term_h = (term_h - STATUS_BAR_H).max(0.0);
     }
 
     let sftp_dock = win.get_sftp_dock().to_string();
+    // Collapsed the panel shrinks to the splitter's 24px handle strip, so the
+    // terminal keeps everything above it (ui/terminal_view.slint sf-h).
     let sftp_take = if term_state.sftp_collapsed {
-        36.0
+        // A bottom-docked panel folds flush into the status bar: no gripper.
+        if sftp_dock == "bottom" { 0.0 } else { 24.0 }
     } else if sftp_dock == "left" || sftp_dock == "right" {
-        side_sftp_width(term_state.sftp_panel_width) + 4.0
+        side_sftp_width(term_state.sftp_panel_width) + 1.0
     } else {
-        term_state.sftp_panel_height + 4.0
+        term_state.sftp_panel_height + 1.0
     };
     shrink_edge(
         &mut term_x,
@@ -219,10 +234,10 @@ pub(super) fn app_content_area(win: &AppWindow) -> LogicalRect {
             && win.get_sidebar_collapsed()
             && win.get_sidebar_dock().as_str() == dock.as_str();
         let welcome_taken = (if win.get_welcome_collapsed() {
-            36.0
+            GRIP
         } else {
             win.get_welcome_sidebar_width()
-        }) + if sidebar_strip_outside { 36.0 } else { 0.0 };
+        }) + if sidebar_strip_outside { GRIP } else { 0.0 };
         shrink_edge(
             &mut area.x,
             &mut area.y,
@@ -235,7 +250,7 @@ pub(super) fn app_content_area(win: &AppWindow) -> LogicalRect {
 
     let side_dock = win.get_sidebar_dock().to_string();
     let side_take = if win.get_sidebar_collapsed() {
-        36.0
+        GRIP
     } else if side_dock == "left" || side_dock == "right" {
         win.get_sidebar_width() + 4.0
     } else {
@@ -260,7 +275,7 @@ pub(super) fn app_content_area(win: &AppWindow) -> LogicalRect {
             return area;
         }
         let quick_take = if win.get_quick_panel_collapsed() {
-            36.0
+            GRIP
         } else if quick_dock == "left" || quick_dock == "right" {
             win.get_quick_panel_width() + 4.0
         } else {
@@ -328,13 +343,13 @@ pub(super) fn active_sftp_local_pane_rect(win: &AppWindow) -> Option<(String, Lo
         return None;
     }
 
-    // TerminalView starts with a 24px connection-status strip; the SFTP panel
-    // is docked inside the region below it.
+    // The SFTP panel is docked inside the dock region; the status bar owns the
+    // bottom row of the terminal view.
     let region = LogicalRect {
         x: term.x,
-        y: term.y + 24.0,
+        y: term.y,
         w: term.w,
-        h: (term.h - 24.0).max(0.0),
+        h: (term.h - STATUS_BAR_H).max(0.0),
     };
     let dock = win.get_sftp_dock().to_string();
     let vertical = dock == "left" || dock == "right";

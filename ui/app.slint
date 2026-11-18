@@ -21,8 +21,9 @@ import { Welcome, SessionInfo } from "welcome.slint";
 import { SessionDialog, SessionDraft, PortFwd, TriggerDraft, JumpHop } from "session_dialog.slint";
 import { ConfirmDialog } from "confirm_dialog.slint";
 import { ModalLayer, ModalKind } from "modal.slint";
-import { LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, ToolStrip } from "widgets.slint";
+import { LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, RailButton, ToolStrip } from "widgets.slint";
 import { TerminalView, TermSpan, TermMatch, FindStatus, QuickCmd, QuickDockPanel } from "terminal_view.slint";
+import { CommandEditResult } from "command_bar.slint";
 import { SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
 import { TerminalView, TermSpan, TermMatch, QuickCmd, QuickDockPanel } from "terminal_view.slint";
 import { SftpEntry, SftpTreeNode, SftpLocalPlace, TunnelInfo, SftpPathSuggestion, SftpPathSuggestions } from "sftp_panel.slint";
@@ -554,6 +555,20 @@ export component AppWindow inherits Window {
     // persist-* callbacks (fired on drag end).
     in-out property <length> sidebar-width: 220px;
     in-out property <length> sidebar-height: 240px;
+    // One shared width for every panel the navigation rail can open (sessions,
+    // resources, quick commands): opening another icon must not resize the
+    // layout, and the last size the user dragged sticks across restarts
+    // (#nav-size). The per-panel widths above are kept in sync with it.
+    in-out property <length> nav-width: 240px;
+    callback persist-nav-width(float /* logical px */);
+    // Everyone follows the shared width: dragging any of the three splitters
+    // resizes all of them at once, so opening another rail icon never shifts
+    // the layout (#nav-size).
+    changed nav-width => {
+        root.sidebar-width = root.nav-width;
+        root.welcome-sidebar-width = root.nav-width;
+        root.quick-panel-width = root.nav-width;
+    }
     property <bool> sidebar-dragging;            // splitter being dragged
     callback persist-sidebar-width(float /* logical px */);
 
@@ -673,6 +688,11 @@ export component AppWindow inherits Window {
     in property <[string]> history-view;             // filtered dropdown, oldest first (newest last, #101)
     in property <[string]> history-preview;          // history-view flattened to one line each (#419)
     callback run-command(string /* tab-id */, string /* cmd */, bool /* to-all */);
+    // The panel's roomy command editor asks Rust to apply one editing step;
+    // Rust is stateless here and just answers with the new text and caret.
+    callback command-edit-step(string /* text */, int /* caret */, int /* anchor line */,
+        int /* start column */, int /* end column */, int /* op */,
+        string /* typed */) -> CommandEditResult;
     callback copy-text(string);                 // copy a history command (#96)
     callback delete-history(int /* index */);   // remove a history entry (#96)
     callback delete-history-cmd(string /* cmd */);   // remove a history entry by command (#101)
@@ -840,9 +860,10 @@ export component AppWindow inherits Window {
     // SFTP follows the terminal's cd; opt out in Interface settings.
     in-out property <bool> sftp-follow-cd: true;
     callback set-sftp-follow-cd(bool);             // apply + persist
-    // Hide the quick-command bar under the terminal; toolbar toggle persists it.
-    in-out property <bool> cmd-bar-hidden: false;
-    callback set-cmd-bar-hidden(bool);             // apply + persist
+    // The docked command editor (file-transfer panel, Command tab) replaced the
+    // legacy quick-command bar under the terminal: it is no longer rendered and
+    // no longer has a toolbar toggle.
+    in-out property <bool> cmd-bar-hidden: true;
     // Zen (focus) mode toggle shortcut: Ctrl+Alt+Z (⌘⌥Z on macOS).
     callback toggle-zen-key();
     // Always ask where to save on each download (#87); default off.
@@ -869,6 +890,8 @@ export component AppWindow inherits Window {
     callback set-ssh-keepalive(bool, int, int);
     in-out property <bool> zen-mode: false;
     callback set-zen-mode(bool);
+    // Wall clock in the terminal pane's bottom status bar (ticked by Rust).
+    in-out property <string> status-clock: "";
     // Zen empties/restores the whole dock stack without resizing the frame, so
     // every entry point (keyboard toggle AND the settings switch through the
     // two-way binding) must re-run the dock geometry — one hook covers them all
@@ -918,7 +941,7 @@ export component AppWindow inherits Window {
     property <bool> welcome-sidebar-horizontal:
         root.welcome-sidebar-dock == "left" || root.welcome-sidebar-dock == "right";
     property <length> welcome-sidebar-taken:
-        root.welcome-collapsed ? 36px : root.welcome-sidebar-width;
+        root.welcome-collapsed ? 28px : root.welcome-sidebar-width;
     callback persist-welcome-sidebar-dock(string);
     // Welcome sidebar collapsed to the edge icon strip (IDEA-style), persisted.
     in-out property <bool> welcome-collapsed: false;
@@ -1176,6 +1199,16 @@ export component AppWindow inherits Window {
     // the index into dock-panels; `pos` is the cursor's distance from the
     // panel's outer edge along the dock normal (the new extent, px).
     callback panel-extent-drag(int /* panel index */, float /* pos */);
+    // Pointer pressed on a resize handle: remember the width the panel had
+    // before the gesture, so folding it back to its strip does not leave the
+    // shared nav width at the minimum the cursor swept through (#nav-restore).
+    callback panel-extent-drag-start();
+    // Pointer released after a resize drag: persist the new thickness.
+    callback panel-extent-drag-end();
+    // Dragging a folded panel's strip grip outwards: `pos` is the pointer's
+    // distance from that dock edge (the new extent, px).
+    callback strip-extent-drag(string /* kind */, string /* edge */, float /* pos */);
+
     in-out property <string> active-tab-id: "welcome";
     in property <[TerminalState]> terminals;
 
@@ -1195,6 +1228,7 @@ export component AppWindow inherits Window {
     // Saved credentials for the SSH login picker (#526); row 0 = none.
     in property <[string]> credential-choices;
     in property <[string]> credential-ids;
+    in property <[string]> credential-users;
     in-out property <string> dialog-credential-id;
     in-out property <int> dialog-credential-index: 0;
     in-out property <string> dialog-proxy-type: "none";  // "none" | "socks5" | "http"
@@ -1699,6 +1733,12 @@ export component AppWindow inherits Window {
                     }
                     WinBtn { icon: "\u{E5CD}"; danger: true; clicked => { root.win-close(); } }
                 }
+                // 1px seam between the title bar and everything below (#layout).
+                Rectangle {
+                    x: 0px; y: parent.height - 1px;
+                    width: parent.width; height: 1px;
+                    background: Theme.border-subtle;
+                }
             }
 
             // Dock area — fills below the title bar. The resource sidebar and the
@@ -1720,10 +1760,17 @@ export component AppWindow inherits Window {
             property <bool> sidebar-strip-outside:
                 !root.hide-panels && root.welcome-as-sidebar && !root.welcome-collapsed
                 && root.sidebar-collapsed && root.sidebar-dock == root.welcome-sidebar-dock;
-            property <length> sidebar-outside-strip: dock-area.sidebar-strip-outside ? 36px : 0px;
-            property <length> welcome-strip: (!root.hide-panels && root.welcome-as-sidebar && root.welcome-collapsed) ? 36px : 0px;
+            property <length> sidebar-outside-strip: dock-area.sidebar-strip-outside ? 28px : 0px;
+            property <length> welcome-strip: (!root.hide-panels && root.welcome-as-sidebar && root.welcome-collapsed) ? 28px : 0px;
             property <length> welcome-size: (!root.hide-panels && root.welcome-as-sidebar && !root.welcome-collapsed) ? root.welcome-sidebar-width : 0px;
             property <length> welcome-taken: welcome-strip + welcome-size + sidebar-outside-strip;
+            // Permanent navigation rail (#rail): with the session list docked to
+            // the left edge, the 28px icon band always stays on screen (Rust
+            // `strip_on_edge` keeps reserving it), panels open beside it, and the
+            // icons never disappear when a panel is expanded.
+            property <bool> nav-rail-on:
+                !root.hide-panels && root.welcome-as-sidebar
+                && root.welcome-sidebar-dock == "left";
             property <bool> welcome-horizontal: root.welcome-sidebar-horizontal;
             property <bool> welcome-sidebar-dragging;
             property <bool> combine-collapsed-tools:
@@ -1731,7 +1778,7 @@ export component AppWindow inherits Window {
                 && root.sidebar-collapsed && root.sidebar-dock == root.welcome-sidebar-dock;
             // A collapsed quick-command sidebar joins an existing collapsed strip
             // on the same edge. Only when no such strip exists does it reserve its
-            // own outermost 36px slot (#215).
+            // own outermost 28px slot (#215).
             property <bool> quick-merge-welcome:
                 root.quick-panel-open && root.quick-panel-collapsed
                 && root.welcome-as-sidebar && root.welcome-collapsed
@@ -1743,11 +1790,14 @@ export component AppWindow inherits Window {
             property <length> quick-outer-strip:
                 !root.hide-panels && root.quick-panel-open && root.quick-panel-collapsed
                     && !dock-area.quick-merge-welcome && !dock-area.quick-merge-sidebar
-                    ? 36px : 0px;
+                    ? 28px : 0px;
             property <bool> quick-outer-horizontal:
                 root.quick-panel-dock == "left" || root.quick-panel-dock == "right";
+            // With the rail (#rail) the quick panel's folded icon lives in the
+            // rail itself, so the left band is never reserved twice.
             property <length> quick-left:
-                root.quick-panel-dock == "left" ? dock-area.quick-outer-strip : 0px;
+                root.quick-panel-dock == "left" && !dock-area.nav-rail-on
+                    ? dock-area.quick-outer-strip : 0px;
             property <length> quick-right:
                 root.quick-panel-dock == "right" ? dock-area.quick-outer-strip : 0px;
             property <length> quick-top:
@@ -1755,12 +1805,23 @@ export component AppWindow inherits Window {
             property <length> quick-bottom:
                 root.quick-panel-dock == "bottom" ? dock-area.quick-outer-strip : 0px;
 
-            if dock-area.quick-outer-strip > 0px : ToolStrip {
+            if dock-area.quick-outer-strip > 0px
+                    && !(dock-area.nav-rail-on && root.quick-panel-dock == "left") : ToolStrip {
                 x: root.quick-panel-dock == "right" ? parent.width - parent.quick-outer-strip : 0px;
                 y: root.quick-panel-dock == "bottom" ? parent.height - parent.quick-outer-strip : 0px;
                 width: parent.quick-outer-horizontal ? parent.quick-outer-strip : parent.width;
                 height: parent.quick-outer-horizontal ? parent.height : parent.quick-outer-strip;
                 dock-edge: root.quick-panel-dock;
+                grip-drag(ax, ay) => {
+                    root.strip-extent-drag("quick", root.quick-panel-dock,
+                        root.quick-panel-dock == "right"
+                            ? (dock-area.absolute-position.x + dock-area.width) / 1px - ax
+                            : root.quick-panel-dock == "left"
+                                ? ax - dock-area.absolute-position.x / 1px
+                                : root.quick-panel-dock == "bottom"
+                                    ? (dock-area.absolute-position.y + dock-area.height) / 1px - ay
+                                    : ay - dock-area.absolute-position.y / 1px);
+                }
                 glyph: "\u{E3E7}";
                 tooltip: @tr("Quick commands");
                 expand => {
@@ -1770,7 +1831,8 @@ export component AppWindow inherits Window {
             }
 
             // Collapsed welcome → a thin left icon strip (click the icon to re-open).
-            if root.welcome-as-sidebar && root.welcome-collapsed : ToolStrip {
+            // Hidden while the permanent rail (#rail) owns the left edge.
+            if root.welcome-as-sidebar && root.welcome-collapsed && !dock-area.nav-rail-on : ToolStrip {
                 x: root.welcome-sidebar-dock == "right"
                     ? parent.width - parent.quick-right - parent.welcome-strip
                     : root.welcome-sidebar-dock == "left" ? parent.quick-left : parent.quick-left;
@@ -1782,6 +1844,16 @@ export component AppWindow inherits Window {
                 height: parent.welcome-horizontal
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.welcome-strip;
                 dock-edge: root.welcome-sidebar-dock;
+                grip-drag(ax, ay) => {
+                    root.strip-extent-drag("welcome", root.welcome-sidebar-dock,
+                        root.welcome-sidebar-dock == "right"
+                            ? (dock-area.absolute-position.x + dock-area.width) / 1px - ax
+                            : root.welcome-sidebar-dock == "left"
+                                ? ax - dock-area.absolute-position.x / 1px
+                                : root.welcome-sidebar-dock == "bottom"
+                                    ? (dock-area.absolute-position.y + dock-area.height) / 1px - ay
+                                    : ay - dock-area.absolute-position.y / 1px);
+                }
                 glyph: "\u{E88A}";   // session list / welcome
                 show-second: parent.combine-collapsed-tools || parent.quick-merge-welcome;
                 second-glyph: parent.combine-collapsed-tools ? "\u{E871}" : "\u{E3E7}";
@@ -1811,20 +1883,31 @@ export component AppWindow inherits Window {
 
             // Collapsed resource panel → a ToolStrip icon bar at the same docked
             // edge (M5), anchored to the OUTER edge of dock-area so it lines up
-            // with the 36px band the Rust dock engine reserves for it (#dock-stack).
-            if !root.hide-panels && root.sidebar-collapsed && !dock-area.combine-collapsed-tools && !dock-area.sidebar-strip-outside : ToolStrip {
+            // with the 28px band the Rust dock engine reserves for it (#dock-stack).
+            if !root.hide-panels && root.sidebar-collapsed && !dock-area.combine-collapsed-tools && !dock-area.sidebar-strip-outside
+                    && !(dock-area.nav-rail-on && root.sidebar-dock == "left") : ToolStrip {
                 x: root.sidebar-dock == "right"
-                    ? parent.width - 36px - parent.quick-right
+                    ? parent.width - 28px - parent.quick-right
                     : parent.quick-left;
                 y: root.sidebar-dock == "bottom"
-                    ? parent.height - 36px - parent.quick-bottom
+                    ? parent.height - 28px - parent.quick-bottom
                     : parent.quick-top;
                 width: root.sidebar-horizontal
-                    ? 36px : parent.width - parent.quick-left - parent.quick-right;
+                    ? 28px : parent.width - parent.quick-left - parent.quick-right;
                 height: root.sidebar-horizontal
                     ? parent.height - parent.quick-top - parent.quick-bottom
-                    : 36px;
+                    : 28px;
                 dock-edge: root.sidebar-dock;
+                grip-drag(ax, ay) => {
+                    root.strip-extent-drag("sidebar", root.sidebar-dock,
+                        root.sidebar-dock == "right"
+                            ? (dock-area.absolute-position.x + dock-area.width) / 1px - ax
+                            : root.sidebar-dock == "left"
+                                ? ax - dock-area.absolute-position.x / 1px
+                                : root.sidebar-dock == "bottom"
+                                    ? (dock-area.absolute-position.y + dock-area.height) / 1px - ay
+                                    : ay - dock-area.absolute-position.y / 1px);
+                }
                 glyph: "\u{E871}";   // dashboard — resource panel
                 show-second: dock-area.quick-merge-sidebar;
                 second-glyph: "\u{E3E7}";
@@ -1841,7 +1924,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if dock-area.sidebar-strip-outside : ToolStrip {
+            if dock-area.sidebar-strip-outside && !dock-area.nav-rail-on : ToolStrip {
                 x: root.welcome-sidebar-dock == "right"
                     ? parent.width - parent.quick-right - parent.sidebar-outside-strip
                     : root.welcome-sidebar-dock == "left" ? parent.quick-left : parent.quick-left;
@@ -1853,6 +1936,16 @@ export component AppWindow inherits Window {
                 height: parent.welcome-horizontal
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.sidebar-outside-strip;
                 dock-edge: root.welcome-sidebar-dock;
+                grip-drag(ax, ay) => {
+                    root.strip-extent-drag("sidebar", root.welcome-sidebar-dock,
+                        root.welcome-sidebar-dock == "right"
+                            ? (dock-area.absolute-position.x + dock-area.width) / 1px - ax
+                            : root.welcome-sidebar-dock == "left"
+                                ? ax - dock-area.absolute-position.x / 1px
+                                : root.welcome-sidebar-dock == "bottom"
+                                    ? (dock-area.absolute-position.y + dock-area.height) / 1px - ay
+                                    : ay - dock-area.absolute-position.y / 1px);
+                }
                 glyph: "\u{E871}";
                 show-second: parent.quick-merge-sidebar;
                 second-glyph: "\u{E3E7}";
@@ -1976,6 +2069,7 @@ export component AppWindow inherits Window {
                         } else if (ev.kind == PointerEventKind.up) {
                             dock-area.welcome-sidebar-dragging = false;
                             root.persist-welcome-sidebar-width(root.welcome-sidebar-width / 1px);
+                            root.persist-nav-width(root.nav-width / 1px);
                         }
                     }
                     moved => {
@@ -1988,6 +2082,7 @@ export component AppWindow inherits Window {
                                         : self.absolute-position.x + self.mouse-x
                                             - dock-area.absolute-position.x,
                                     160px, 480px);
+                                root.nav-width = root.welcome-sidebar-width;
                             } else {
                                 root.welcome-sidebar-width = clamp(
                                     root.welcome-sidebar-dock == "bottom"
@@ -2013,11 +2108,11 @@ export component AppWindow inherits Window {
             height: root.dock-central-h;
             // A shared ToolStrip is already reserved outside `rest` while the
             // welcome panel is expanded, or by the merged welcome strip while both
-            // panels are collapsed. Do not reserve the same 36px a second time.
+            // panels are collapsed. Do not reserve the same 28px a second time.
             property <length> sb-w: root.hide-panels ? 0px
-                : root.sidebar-collapsed ? 36px : 0px;
+                : root.sidebar-collapsed ? 28px : 0px;
             property <length> sb-h: root.hide-panels ? 0px
-                : root.sidebar-collapsed ? 36px : 0px;
+                : root.sidebar-collapsed ? 28px : 0px;
             property <length> sp: 0px;
             // The collapsed bar (sb-h) already reserves the bottom strip now.
             property <length> bottom-strip-h: 0px;
@@ -2025,7 +2120,7 @@ export component AppWindow inherits Window {
             // Left sidebar — collapsible and drag-resizable, dockable to any edge.
             // Only shown while expanded; collapsing swaps it for the ToolStrip icon
             // bar below (mirrors the welcome sidebar), so no clipped widgets bleed
-            // through the 36px strip (#resource-collapse).
+            // through the 28px strip (#resource-collapse).
             if false : Rectangle {
                 x: root.sidebar-dock == "right" ? parent.width - parent.sb-w
                  : 0px;
@@ -2120,6 +2215,7 @@ export component AppWindow inherits Window {
                         } else if (ev.kind == PointerEventKind.up) {
                             root.sidebar-dragging = false;
                             root.persist-sidebar-width(root.sidebar-width / 1px);
+                            root.persist-nav-width(root.nav-width / 1px);
                         }
                     }
                     moved => {
@@ -2137,6 +2233,7 @@ export component AppWindow inherits Window {
                                         : (self.absolute-position.x + self.mouse-x)
                                             - dock-area.absolute-position.x,
                                     160px, 520px);
+                                root.nav-width = root.sidebar-width;
                             } else {
                                 root.sidebar-height = clamp(
                                     root.sidebar-dock == "bottom"
@@ -2338,6 +2435,7 @@ export component AppWindow inherits Window {
                         height: term.id == pane.active-id ? parent.height : 0px;
                         tab-id: term.id;
                         status-line: term.status;
+                        status-clock: root.status-clock;
                         spans: term.spans;
                         cursor-row: term.cursor-row;
                         cursor-col: term.cursor-col;
@@ -2457,6 +2555,9 @@ export component AppWindow inherits Window {
                         history-view: root.history-view;
                         history-preview: root.history-preview;
                         run-command(cmd, all) => { root.run-command(term.id, cmd, all); }
+                        command-step(text, caret, anchor, start, end, op, typed) => {
+                            return root.command-edit-step(text, caret, anchor, start, end, op, typed);
+                        }
                         copy-text(t) => { root.copy-text(t); }
                         delete-history(i) => { root.delete-history(i); }
                         delete-history-cmd(c) => { root.delete-history-cmd(c); }
@@ -2762,6 +2863,11 @@ export component AppWindow inherits Window {
                     width: quick-area.quick-horizontal ? 12px : parent.width;
                     height: quick-area.quick-horizontal ? parent.height : 12px;
                     mouse-cursor: quick-area.quick-horizontal ? ew-resize : ns-resize;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.up) {
+                            root.persist-nav-width(root.nav-width / 1px);
+                        }
+                    }
                     moved => {
                         if (self.pressed) {
                             if (quick-area.quick-horizontal) {
@@ -2772,6 +2878,7 @@ export component AppWindow inherits Window {
                                         : (self.absolute-position.x + self.mouse-x)
                                             - quick-area.absolute-position.x,
                                     180px, max(200px, quick-area.width - 240px));
+                                root.nav-width = root.quick-panel-width;
                             } else {
                                 root.quick-panel-height = clamp(
                                     root.quick-panel-dock == "bottom"
@@ -2949,9 +3056,13 @@ export component AppWindow inherits Window {
                     // half of the grab area and leave a 2px target.
                     x: parent.width - 4px; y: 0px;
                     width: 4px; height: parent.height;
-                    background: rr-l.has-hover ? Theme.accent : Theme.border-subtle;
+                    background: transparent;
                     rr-l := TouchArea {
                         mouse-cursor: ew-resize;
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down) { root.panel-extent-drag-start(); }
+                            if (ev.kind == PointerEventKind.up) { root.panel-extent-drag-end(); }
+                        }
                         moved => {
                             if (self.pressed) {
                                 root.panel-extent-drag(gi,
@@ -2960,13 +3071,23 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    // Only the innermost pixel is painted (#layout).
+                    Rectangle {
+                        x: parent.width - 1px; y: 0px;
+                        width: 1px; height: parent.height;
+                        background: rr-l.has-hover ? Theme.accent : Theme.border-subtle;
+                    }
                 }
                 if gp.edge == "right" : Rectangle {
                     x: 0px; y: 0px;
                     width: 4px; height: parent.height;
-                    background: rr-r.has-hover ? Theme.accent : Theme.border-subtle;
+                    background: transparent;
                     rr-r := TouchArea {
                         mouse-cursor: ew-resize;
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down) { root.panel-extent-drag-start(); }
+                            if (ev.kind == PointerEventKind.up) { root.panel-extent-drag-end(); }
+                        }
                         moved => {
                             if (self.pressed) {
                                 root.panel-extent-drag(gi,
@@ -2976,14 +3097,24 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    // Only the innermost pixel is painted (#layout).
+                    Rectangle {
+                        x: 0px; y: 0px;
+                        width: 1px; height: parent.height;
+                        background: rr-r.has-hover ? Theme.accent : Theme.border-subtle;
+                    }
                 }
                 if gp.edge == "top" : Rectangle {
                     // Same reasoning as the left edge: keep the whole 4px inside.
                     x: 0px; y: parent.height - 4px;
                     width: parent.width; height: 4px;
-                    background: rr-t.has-hover ? Theme.accent : Theme.border-subtle;
+                    background: transparent;
                     rr-t := TouchArea {
                         mouse-cursor: ns-resize;
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down) { root.panel-extent-drag-start(); }
+                            if (ev.kind == PointerEventKind.up) { root.panel-extent-drag-end(); }
+                        }
                         moved => {
                             if (self.pressed) {
                                 root.panel-extent-drag(gi,
@@ -2992,13 +3123,23 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    // Only the innermost pixel is painted (#layout).
+                    Rectangle {
+                        x: 0px; y: parent.height - 1px;
+                        width: parent.width; height: 1px;
+                        background: rr-t.has-hover ? Theme.accent : Theme.border-subtle;
+                    }
                 }
                 if gp.edge == "bottom" : Rectangle {
                     x: 0px; y: 0px;
                     width: parent.width; height: 4px;
-                    background: rr-b.has-hover ? Theme.accent : Theme.border-subtle;
+                    background: transparent;
                     rr-b := TouchArea {
                         mouse-cursor: ns-resize;
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down) { root.panel-extent-drag-start(); }
+                            if (ev.kind == PointerEventKind.up) { root.panel-extent-drag-end(); }
+                        }
                         moved => {
                             if (self.pressed) {
                                 root.panel-extent-drag(gi,
@@ -3007,6 +3148,12 @@ export component AppWindow inherits Window {
                                             - dock-area.absolute-position.y)) / 1px);
                             }
                         }
+                    }
+                    // Only the innermost pixel is painted (#layout).
+                    Rectangle {
+                        x: 0px; y: 0px;
+                        width: parent.width; height: 1px;
+                        background: rr-b.has-hover ? Theme.accent : Theme.border-subtle;
                     }
                 }
             }
@@ -3017,9 +3164,14 @@ export component AppWindow inherits Window {
                 y: dd.y;
                 width: dd.w;
                 height: dd.h;
-                background: dd-ta.pressed ? Theme.accent : Theme.border-strong;
+                background: dd-ta.pressed ? Theme.accent : Theme.border-subtle;
                 animate background { duration: 100ms; }
                 dd-ta := TouchArea {
+                    // The 1px seam is too thin to grab: widen the hit area.
+                    x: dd.vertical ? 0px : -4px;
+                    y: dd.vertical ? -4px : 0px;
+                    width: dd.vertical ? parent.width : 9px;
+                    height: dd.vertical ? 9px : parent.height;
                     mouse-cursor: dd.vertical ? ns-resize : ew-resize;
                     moved => {
                         if (self.pressed) {
@@ -3030,6 +3182,96 @@ export component AppWindow inherits Window {
                                     : ((self.absolute-position.x + self.mouse-x)
                                         - dock-area.absolute-position.x) / 1px);
                         }
+                    }
+                }
+            }
+
+            // Permanent navigation rail (#rail). Lives in the 28px band the Rust
+            // dock engine always reserves on the left edge, so panels open to its
+            // right instead of replacing it: the icons stay put, clicking one
+            // toggles its panel, and opening a panel closes the other ones.
+            if dock-area.nav-rail-on : Rectangle {
+                x: 0px;
+                y: parent.quick-top;
+                width: 28px;
+                height: parent.height - parent.quick-top - parent.quick-bottom;
+                background: Theme.bg-panel-alt;
+                Rectangle {   // hairline toward the docked panels
+                    x: parent.width - 1px;
+                    y: 0px;
+                    width: 1px;
+                    height: parent.height;
+                    background: Theme.border-subtle;
+                }
+                RailButton {
+                    y: 4px;
+                    width: parent.width;
+                    glyph: "\u{E88A}";   // session list / welcome
+                    active: !root.welcome-collapsed;
+                    clicked => {
+                        if (!root.welcome-collapsed) {
+                            root.welcome-collapsed = true;
+                            root.set-welcome-collapsed(true);
+                        } else {
+                            root.welcome-collapsed = false;
+                            root.set-welcome-collapsed(false);
+                            // Only one panel at a time on the rail.
+                            if (!root.sidebar-collapsed) {
+                                root.sidebar-collapsed = true;
+                                root.set-sidebar-collapsed(true);
+                            }
+                            if (root.quick-panel-open && !root.quick-panel-collapsed
+                                    && root.quick-panel-dock == "left") {
+                                root.quick-panel-collapsed = true;
+                            }
+                        }
+                        root.dock-layout-changed();
+                    }
+                }
+                RailButton {
+                    y: 32px;
+                    width: parent.width;
+                    glyph: "\u{E871}";   // dashboard — resource panel
+                    active: !root.sidebar-collapsed;
+                    clicked => {
+                        if (!root.sidebar-collapsed) {
+                            root.sidebar-collapsed = true;
+                            root.set-sidebar-collapsed(true);
+                        } else {
+                            root.sidebar-collapsed = false;
+                            root.set-sidebar-collapsed(false);
+                            // Only one panel at a time on the rail.
+                            if (!root.welcome-collapsed) {
+                                root.welcome-collapsed = true;
+                                root.set-welcome-collapsed(true);
+                            }
+                            if (root.quick-panel-open && !root.quick-panel-collapsed
+                                    && root.quick-panel-dock == "left") {
+                                root.quick-panel-collapsed = true;
+                            }
+                        }
+                        root.dock-layout-changed();
+                    }
+                }
+                if root.quick-panel-open && root.quick-panel-dock == "left" : RailButton {
+                    y: 60px;
+                    width: parent.width;
+                    glyph: "\u{E3E7}";   // quick commands
+                    active: !root.quick-panel-collapsed;
+                    clicked => {
+                        root.quick-panel-collapsed = !root.quick-panel-collapsed;
+                        if (!root.quick-panel-collapsed) {
+                            // Only one panel at a time on the rail.
+                            if (!root.welcome-collapsed) {
+                                root.welcome-collapsed = true;
+                                root.set-welcome-collapsed(true);
+                            }
+                            if (!root.sidebar-collapsed) {
+                                root.sidebar-collapsed = true;
+                                root.set-sidebar-collapsed(true);
+                            }
+                        }
+                        root.dock-layout-changed();
                     }
                 }
             }
@@ -3132,16 +3374,6 @@ export component AppWindow inherits Window {
     IconBtn {
         x: root.width - 154px - root.toolbar-x-off; y: root.toolbar-y;
         visible: !root.term-fullscreen;
-        icon: "\u{E86F}";   // Material "code" — command bar
-        active: !root.cmd-bar-hidden;
-        tooltip: root.lang-en
-            ? (root.cmd-bar-hidden ? "Show command bar" : "Hide command bar")
-            : (root.cmd-bar-hidden ? "显示命令栏" : "隐藏命令栏");
-        clicked => { root.cmd-bar-hidden = !root.cmd-bar-hidden; root.set-cmd-bar-hidden(root.cmd-bar-hidden); }
-    }
-    IconBtn {
-        x: root.width - 184px - root.toolbar-x-off; y: root.toolbar-y;
-        visible: !root.term-fullscreen;
         icon: "\u{F10D}";   // Material "push_pin" — always on top (#450)
         icon-color: root.pinned ? Theme.accent : Theme.text-secondary;
         active: root.pinned;
@@ -3153,7 +3385,7 @@ export component AppWindow inherits Window {
     // Updates: a quiet red dot instead of a popup banner when a newer release
     // is found; clicking opens Settings → Updates, which holds every action.
     IconBtn {
-        x: root.width - 214px - root.toolbar-x-off; y: root.toolbar-y;
+        x: root.width - 184px - root.toolbar-x-off; y: root.toolbar-y;
         visible: !root.term-fullscreen;
         icon: "\u{E2C0}";   // Material "cloud_download"
         badge: root.update-available;
@@ -4934,6 +5166,7 @@ export component AppWindow inherits Window {
         draft-key-inline-mode <=> root.dialog-key-inline-mode;
         credential-choices: root.credential-choices;
         credential-ids: root.credential-ids;
+        credential-users: root.credential-users;
         draft-credential-id <=> root.dialog-credential-id;
         draft-credential-index <=> root.dialog-credential-index;
         draft-proxy-type <=> root.dialog-proxy-type;

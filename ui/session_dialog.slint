@@ -789,9 +789,11 @@ export component SessionDialog inherits ModalLayer {
     in-out property <string> draft-key-path;
     in-out property <string> draft-key-inline;
     in-out property <bool> draft-key-inline-mode: false;
-    // Saved credentials (#526): parallel labels / ids, row 0 = none.
+    // Saved credentials (#526): parallel labels / ids / usernames, row 0 = none.
     in property <[string]> credential-choices;
     in property <[string]> credential-ids;
+    // Picking a credential seeds the username field with its login name.
+    in property <[string]> credential-users;
     in-out property <string> draft-credential-id;
     in-out property <int> draft-credential-index: 0;
     // An SSH session using a saved credential hides its own login fields.
@@ -1195,24 +1197,32 @@ export component SessionDialog inherits ModalLayer {
                 selected(idx) => {
                     root.draft-credential-id = idx > 0 && idx < root.credential-ids.length
                         ? root.credential-ids[idx] : "";
+                    // Seed the username from the credential; a blank one keeps
+                    // whatever the user already typed.
+                    if idx > 0 && idx < root.credential-users.length
+                            && root.credential-users[idx] != "" {
+                        root.draft-user = root.credential-users[idx];
+                    }
                 }
             }
 
             if root.credential-linked : Text {
-                text: @tr("This session logs in with the saved credential above. Change its username or password in Settings › Credentials; every session that uses it follows.");
+                text: @tr("The saved credential supplies the sign-in method and key or password. Enter a username here to log in as someone else with the same credential; leave it blank to use the credential's username. Settings › Credentials edits the credential itself.");
                 color: Theme.text-muted;
                 font-size: Theme.fs-xs;
                 wrap: word-wrap;
             }
 
             // ── SSH: user + auth. Telnet: optional auto-login (#507) ────────
-            if (root.draft-kind == "ssh" && !root.credential-linked) || root.draft-kind == "telnet" : LabeledInput {
+            if root.draft-kind == "ssh" || root.draft-kind == "telnet" : LabeledInput {
                 input-background: Theme.bg-elevated;
                 idle-border: Theme.border-strong;
                 label: @tr("Username");
                 placeholder: root.draft-kind == "telnet"
                     ? @tr("Optional, typed at the login prompt")
-                    : @tr("Prompted on connect if blank");
+                    : (root.credential-linked
+                        ? @tr("Blank uses the saved credential's username")
+                        : @tr("Prompted on connect if blank"));
                 value <=> root.draft-user;
             }
 

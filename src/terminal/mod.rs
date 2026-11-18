@@ -9,6 +9,8 @@ mod input;
 mod json_output;
 #[path = "impls/charset.rs"]
 mod charset;
+#[path = "impls/command_edit.rs"]
+pub(crate) mod command_edit;
 #[path = "impls/encoding.rs"]
 mod encoding;
 #[path = "impls/glyph_fallback.rs"]
@@ -21,6 +23,8 @@ mod output_highlight;
 mod presentation;
 #[path = "impls/render.rs"]
 mod render;
+#[path = "impls/syntax.rs"]
+mod syntax;
 #[path = "impls/render_gate.rs"]
 mod render_gate;
 #[path = "impls/scheme.rs"]

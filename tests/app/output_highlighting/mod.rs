@@ -38,6 +38,7 @@ fn highlights_uppercase_level_and_preserves_columns() {
         vec![plain_run("2026-07-14T10:20:30Z ERROR request failed", 0)],
         OutputHighlightPreset::Log,
         &[],
+        true,
     );
     assert_eq!(runs.len(), 3);
     assert_eq!(runs[1].text, "ERROR");
@@ -51,7 +52,7 @@ fn highlights_uppercase_level_and_preserves_columns() {
 #[test]
 fn highlights_structured_lowercase_level_only() {
     let json = r#"{"level":"warn","message":"disk nearly full"}"#;
-    let runs = highlight_plain_output(vec![plain_run(json, 4)], OutputHighlightPreset::Log, &[]);
+    let runs = highlight_plain_output(vec![plain_run(json, 4)], OutputHighlightPreset::Log, &[], true);
     let level = runs
         .iter()
         .find(|run| run.text == "warn")
@@ -66,7 +67,7 @@ fn highlights_structured_lowercase_level_only() {
 fn preserves_existing_ansi_styles() {
     let mut coloured = plain_run("ERROR", 0);
     coloured.fg = vt100::Color::Idx(2);
-    let runs = highlight_plain_output(vec![coloured], OutputHighlightPreset::Log, &[]);
+    let runs = highlight_plain_output(vec![coloured], OutputHighlightPreset::Log, &[], true);
     assert_eq!(runs.len(), 1);
     assert!(matches!(runs[0].fg, vt100::Color::Idx(2)));
     assert!(!runs[0].bold);
@@ -92,6 +93,7 @@ fn off_preset_leaves_plain_levels_untouched() {
         vec![plain_run("ERROR request failed", 0)],
         OutputHighlightPreset::Off,
         &[],
+        true,
     );
     assert_eq!(runs.len(), 1);
     assert!(matches!(runs[0].fg, vt100::Color::Default));
@@ -104,6 +106,7 @@ fn devops_preset_adds_deployment_and_structured_states() {
         vec![plain_run("deploy SUCCESS", 0)],
         OutputHighlightPreset::DevOps,
         &[],
+        true,
     );
     let token = success
         .iter()
@@ -115,6 +118,7 @@ fn devops_preset_adds_deployment_and_structured_states() {
         vec![plain_run(r#"{"status":"failed"}"#, 0)],
         OutputHighlightPreset::DevOps,
         &[],
+        true,
     );
     let token = json
         .iter()
@@ -126,6 +130,7 @@ fn devops_preset_adds_deployment_and_structured_states() {
         vec![plain_run("deploy SUCCESS", 0)],
         OutputHighlightPreset::Log,
         &[],
+        true,
     );
     assert_eq!(conservative.len(), 1);
 }
@@ -137,6 +142,7 @@ fn custom_literal_is_case_insensitive_and_overrides_builtin_colour() {
         vec![plain_run("ERROR then error", 0)],
         OutputHighlightPreset::Log,
         &[rule],
+        true,
     );
     let hits: Vec<_> = runs
         .iter()
@@ -159,6 +165,7 @@ fn custom_regex_can_highlight_whole_line_without_overwriting_ansi() {
         vec![plain_run("request timeout   ", 0), ansi],
         OutputHighlightPreset::Log,
         &[rule],
+        true,
     );
     assert!(matches!(runs[0].fg, vt100::Color::Idx(13)));
     assert!(runs[0].bold);
@@ -171,7 +178,7 @@ fn custom_unicode_match_preserves_terminal_grid_columns() {
     let text = "前缀错误 done";
     let mut run = plain_run(text, 0);
     run.cells = text_cell_width(text);
-    let runs = highlight_plain_output(vec![run], OutputHighlightPreset::Log, &[rule]);
+    let runs = highlight_plain_output(vec![run], OutputHighlightPreset::Log, &[rule], true);
     let hit = runs
         .iter()
         .find(|run| run.text == "错误")

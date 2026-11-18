@@ -29,6 +29,72 @@ pub(super) struct WinCtx {
     pub(super) window_size_tracking_ready: Rc<Cell<bool>>,
 }
 
+/// Dragging a docked panel's in-edge handle closer than this to its dock edge
+/// folds the panel away, leaving only its icon strip on that edge (click the
+/// strip's icon to bring the panel back).
+const DOCK_FOLD_AT: f32 = 60.0;
+
+/// Width the shared navigation slot falls back to (a freshly opened panel, or a
+/// stored width too narrow to be useful).
+pub(super) const NAV_DEFAULT_WIDTH: f32 = 240.0;
+
+/// Below this the stored nav width is treated as a leftover from a fold sweep
+/// and replaced by [`NAV_DEFAULT_WIDTH`] when a panel opens.
+pub(super) const NAV_MIN_OPEN: f32 = 180.0;
+
+/// Fold a docked panel down to the icon strip it leaves on its dock edge.
+/// The Slint property drives layout; the callback persists the new state.
+fn fold_docked_panel(window: &AppWindow, kind: &str) {
+    match kind {
+        "sidebar" => {
+            window.set_sidebar_collapsed(true);
+            window.invoke_set_sidebar_collapsed(true);
+        }
+        "welcome" => {
+            window.set_welcome_collapsed(true);
+            window.invoke_set_welcome_collapsed(true);
+        }
+        "quick" => window.set_quick_panel_collapsed(true),
+        _ => {}
+    }
+}
+
+
+/// Undo [`fold_docked_panel`] for the same panel.
+fn unfold_docked_panel(window: &AppWindow, kind: &str) {
+    match kind {
+        "sidebar" => {
+            window.set_sidebar_collapsed(false);
+            window.invoke_set_sidebar_collapsed(false);
+        }
+        "welcome" => {
+            window.set_welcome_collapsed(false);
+            window.invoke_set_welcome_collapsed(false);
+        }
+        "quick" => window.set_quick_panel_collapsed(false),
+        _ => {}
+    }
+}
+
+/// Resize a docked panel to `thickness` px along its edge normal (width on a
+/// left/right edge, height on a top/bottom one).
+fn set_docked_panel_thickness(
+    window: &AppWindow,
+    kind: &str,
+    horizontal_edge: bool,
+    thickness: f32,
+) {
+    let thickness = thickness.clamp(MIN_THICK, 2600.0);
+    match (kind, horizontal_edge) {
+        ("sidebar", true) => window.set_sidebar_width(thickness),
+        ("sidebar", false) => window.set_sidebar_height(thickness),
+        ("welcome", _) => window.set_welcome_sidebar_width(thickness),
+        ("quick", true) => window.set_quick_panel_width(thickness),
+        ("quick", false) => window.set_quick_panel_height(thickness),
+        _ => {}
+    }
+}
+
 /// Build and wire one application window. Called for the first window by
 /// `run()` and for every subsequent window by the new-window entry points.
 /// `at` pins the window to a physical screen position (tab detach); without
@@ -356,24 +422,83 @@ pub(super) fn open_window(
         let dm3 = dock_dividers_model.clone();
         let da3 = da_size.clone();
         let panels_model_for_extent = dock_panels_model.clone();
+        // Width the panel had when this gesture started. Sweeping the handle in
+        // to the fold threshold leaves the shared nav width at MIN_THICK, which
+        // made a panel re-opened from the rail come back tiny (#nav-restore).
+        let nav_base = Rc::new(Cell::new(NAV_DEFAULT_WIDTH));
+        let nav_base_start = nav_base.clone();
+        let weak_start = window.as_weak();
+        window.on_panel_extent_drag_start(move || {
+            if let Some(w) = weak_start.upgrade() {
+                let px = w.get_nav_width();
+                nav_base_start.set(if px >= NAV_MIN_OPEN { px } else { NAV_DEFAULT_WIDTH });
+            }
+        });
+        let nav_base_drag = nav_base.clone();
         window.on_panel_extent_drag(move |_panel_index: i32, pos: f32| {
             let panel = panels_model_for_extent.row_data(_panel_index as usize);
             if let Some(p) = panel {
                 let kind = p.kind.to_string();
                 let edge = p.edge.to_string();
                 let horizontal_edge = matches!(edge.as_str(), "left" | "right");
-                let thickness = pos.clamp(MIN_THICK, 2600.0);
                 if let Some(w) = weak3.upgrade() {
-                    match (kind.as_str(), horizontal_edge) {
-                        ("sidebar", true) => w.set_sidebar_width(thickness),
-                        ("sidebar", false) => w.set_sidebar_height(thickness),
-                        ("welcome", _) => w.set_welcome_sidebar_width(thickness),
-                        ("quick", true) => w.set_quick_panel_width(thickness),
-                        ("quick", false) => w.set_quick_panel_height(thickness),
-                        _ => {}
+                    if pos < DOCK_FOLD_AT {
+                        // Dragged in past the threshold: fold it to its strip.
+                        // The cursor swept through widths at or below MIN_THICK
+                        // on the way here, so put the pre-drag width back before
+                        // folding — otherwise re-opening from the rail returns a
+                        // sliver of a panel (#nav-restore).
+                        if horizontal_edge {
+                            let base = nav_base_drag.get();
+                            w.set_nav_width(base);
+                            w.invoke_persist_nav_width(base);
+                        }
+                        fold_docked_panel(&w, &kind);
+                    } else {
+                        let thickness = pos.clamp(MIN_THICK, 2600.0);
+                        // The rail opens sessions, resources and quick commands
+                        // in the same slot, so the shared width is what the
+                        // geometry pass reads (#nav-size); writing only the
+                        // per-panel property would leave the panel in place.
+                        if horizontal_edge {
+                            w.set_nav_width(thickness);
+                        }
+                        set_docked_panel_thickness(&w, &kind, horizontal_edge, thickness);
                     }
                     refresh_dock(&w, &ds3, &pm3, &dm3, da3.get());
                 }
+            }
+        });
+        // Releasing a resize drag persists the width the user settled on.
+        let weak_end = window.as_weak();
+        window.on_panel_extent_drag_end(move || {
+            if let Some(w) = weak_end.upgrade() {
+                let px = w.get_nav_width();
+                w.invoke_persist_nav_width(px);
+            }
+        });
+        // Dragging a folded panel's strip grip back out re-opens that panel
+        // at the dragged thickness (the mirror image of folding it above).
+        let weak4 = window.as_weak();
+        let ds4 = dock_stacks.clone();
+        let pm4 = dock_panels_model.clone();
+        let dm4 = dock_dividers_model.clone();
+        let da4 = da_size.clone();
+        window.on_strip_extent_drag(move |kind: SharedString, edge: SharedString, pos: f32| {
+            if pos < DOCK_FOLD_AT {
+                return;
+            }
+            if let Some(w) = weak4.upgrade() {
+                let kind = kind.to_string();
+                let horizontal_edge = matches!(edge.as_str(), "left" | "right");
+                unfold_docked_panel(&w, &kind);
+                // The geometry pass reads the shared nav width (#nav-size), so the
+                // dragged-out thickness has to land there too.
+                if horizontal_edge {
+                    w.set_nav_width(pos.clamp(MIN_THICK, 2600.0));
+                }
+                set_docked_panel_thickness(&w, &kind, horizontal_edge, pos);
+                refresh_dock(&w, &ds4, &pm4, &dm4, da4.get());
             }
         });
     }
@@ -827,6 +952,27 @@ pub(super) fn open_window(
     // WindowState timers vec, which forget_window_state drops on close
     // (Slint timers stop when dropped) — no leaking needed.
     window_timers.borrow_mut().push(timer);
+
+    // --- Status-bar clock (1 Hz) ----------------------------------------
+    // The terminal pane's bottom status bar carries a wall clock; tick it while
+    // the window lives. Same lifecycle as the sampler above.
+    {
+        let clock_weak = window.as_weak();
+        let update_clock = move || {
+            if let Some(window) = clock_weak.upgrade() {
+                let now = chrono::Local::now();
+                window.set_status_clock(now.format("%Y/%m/%d %H:%M:%S").to_string().into());
+            }
+        };
+        update_clock();
+        let clock = slint::Timer::default();
+        clock.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            update_clock,
+        );
+        window_timers.borrow_mut().push(clock);
+    }
 
     // OS file drag-and-drop → upload to the active session's SFTP directory,
     install_window_event_hook(&ctx, &dock_stacks, &activity, &exit_confirmed);

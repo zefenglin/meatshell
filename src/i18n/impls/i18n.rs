@@ -38,7 +38,9 @@ pub fn set_language(code: &str) {
 /// the Chinese bundle exists.
 pub fn apply_to_slint() {
     let lang = if is_en() { "en" } else { "zh" };
-    let _ = slint::select_bundled_translation(lang);
+    if let Err(err) = slint::select_bundled_translation(lang) {
+        tracing::warn!("select bundled translation {:?} failed: {:?}", lang, err);
+    }
 }
 
 /// Current language code, for persisting to config (`"zh"` / `"en"`).

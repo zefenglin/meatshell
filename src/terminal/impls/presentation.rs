@@ -6,19 +6,36 @@ use super::scheme::SchemeColors;
 use crate::terminal::{CompiledOutputRule, HistSpan, OutputHighlightPreset};
 use crate::ui::TermSpan;
 
-/// Highlight the first recognisable log-level token in each otherwise unstyled
-/// terminal run. Uppercase standalone levels cover conventional text logs;
-/// lowercase values are accepted only in a structured `level=...` / JSON field
-/// to avoid colouring ordinary prose that happens to contain words like "error".
+/// Colour otherwise-unstyled terminal runs.
+///
+/// With a WindTerm scheme active (`scheme::syntax_enabled`) every token the
+/// scheme's lexer knows - numbers, addresses, timestamps, paths, options and
+/// the four keyword lists - gets its scope colour, which is what makes output
+/// look like WindTerm (#m07146). Without one, the older single-marker log
+/// highlighting applies: uppercase standalone levels cover conventional text
+/// logs; lowercase values are accepted only in a structured `level=...` /
+/// JSON field to avoid colouring ordinary prose that happens to contain words
+/// like "error". User rules always run last and win.
 pub(crate) fn highlight_plain_output(
     runs: Vec<HistSpan>,
     preset: OutputHighlightPreset,
     custom_rules: &[CompiledOutputRule],
+    is_dark: bool,
 ) -> Vec<HistSpan> {
-    if preset == OutputHighlightPreset::Off {
+    let syntax = super::scheme::syntax_enabled(is_dark).then(|| super::syntax::palette(is_dark));
+    if preset == OutputHighlightPreset::Off && syntax.is_none() {
         return runs;
     }
+    let runs = match syntax {
+        Some(palette) => super::syntax::highlight_syntax(runs, palette),
+        None => runs,
+    };
     let runs = highlight_custom_output(runs, custom_rules);
+    if syntax.is_some() {
+        // The keyword table already colours the log-level words; the single
+        // marker pass would only fight the per-token colours.
+        return runs;
+    }
     const SEARCH_COLS: i32 = 96;
 
     let mut out = Vec::with_capacity(runs.len() + 2);

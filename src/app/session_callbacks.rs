@@ -1772,8 +1772,6 @@ pub(super) fn listen_for_config_changes(ctx: &WinCtx, sessions_model: &Rc<VecMod
                 super::color_theme::apply_color_theme(&w, &store.borrow());
                 // Language translations are process-global; refresh our flag only.
                 w.set_lang_en(crate::i18n::is_en());
-                // Command-bar visibility is a global preference.
-                w.set_cmd_bar_hidden(store.borrow().cmd_bar_hidden());
                 w.set_right_click_copy(store.borrow().right_click_copy());
                 // Persisted terminal font size (settings stepper) is global too.
                 w.set_term_font_size(store.borrow().font_size() as f32);

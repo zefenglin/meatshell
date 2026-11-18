@@ -260,11 +260,22 @@ pub(super) fn panel_edge(window: &AppWindow, kind: &str) -> Option<&'static str>
 /// left/right edge, height on a top/bottom one (logical px).
 pub(super) fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
     let horizontal_edge = matches!(panel_edge(window, kind), Some("left" | "right"));
+    // The rail opens sessions, resources and quick commands in the same slot, so
+    // all three share one width (#nav-size); only top/bottom docks use heights.
+    let nav_width = || {
+        let w = window.get_nav_width();
+        if w.is_finite() && w >= 120.0 {
+            w
+        } else {
+            240.0
+        }
+    };
     match kind {
-        "sidebar" if horizontal_edge => window.get_sidebar_width(),
+        "sidebar" if horizontal_edge => nav_width(),
         "sidebar" => window.get_sidebar_height(),
+        "welcome" if horizontal_edge => nav_width(),
         "welcome" => window.get_welcome_sidebar_width(),
-        "quick" if horizontal_edge => window.get_quick_panel_width(),
+        "quick" if horizontal_edge => nav_width(),
         "quick" => window.get_quick_panel_height(),
         _ => 220.0,
     }
@@ -275,6 +286,15 @@ pub(super) fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
 /// its strip actually renders). Multiple folded panels on one edge merge
 /// into a single band, hence the boolean.
 pub(super) fn strip_on_edge(window: &AppWindow, edge: &str) -> bool {
+    // The navigation rail (#rail) is permanent: with the session list docked to
+    // the left edge its 28px icon band is reserved whether or not a panel is
+    // folded, so the icons never move and panels always open beside it.
+    if edge == "left"
+        && window.get_welcome_as_sidebar()
+        && window.get_welcome_sidebar_dock().as_str() == "left"
+    {
+        return true;
+    }
     let docks = |s: slint::SharedString| s.as_str() == edge;
     (window.get_sidebar_collapsed() && docks(window.get_sidebar_dock()))
         || (window.get_welcome_as_sidebar()

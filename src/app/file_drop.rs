@@ -95,6 +95,11 @@ pub(super) fn handle_file_drop_at(
     let Some((_active, term, _term_state)) = active_terminal_panel_rects(win) else {
         return;
     };
+    // Keep the bottom status bar out of the drop target.
+    let term = LogicalRect {
+        h: (term.h - crate::app::hit_test::STATUS_BAR_H).max(0.0),
+        ..term
+    };
     if !contains_logical(term, client_x, client_y) {
         return; // dropped outside the terminal panel — ignore
     }

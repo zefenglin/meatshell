@@ -7,22 +7,26 @@
 （资源监控侧栏、会话管理、多标签页终端）的同时，把内存占用从 400 MB+ 的
 JVM 压到几十 MB 原生级别。
 
+> 本仓库是 [yituorou/meatshell](https://github.com/yituorou/meatshell) 的分支，
+> 重点打磨终端观感与日常操作：WindTerm 风格语法高亮、常驻左侧导航栏、固定在底部的
+> 文件 / 命令 / 隧道面板，以及更安静的默认外观（深色主题、无壁纸、资源监控默认在左）。
+
 ## 截图
 
 <p align="center">
-  <img src="docs/screenshots/01-welcome.png" alt="欢迎页 / 会话管理" width="800"><br>
-  <em>欢迎页：会话管理 + 左侧本机资源监控</em>
+  <img src="docs/screenshots/01-welcome.png" alt="快速连接 / 会话管理" width="800"><br>
+  <em>快速连接：会话管理 + 内嵌终端</em>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/02-terminal-htop.png" alt="终端 + SFTP" width="800"><br>
-  <em>多标签页终端（htop 全屏渲染）+ 底部 SFTP 文件浏览 + 远端资源监控</em>
+  <img src="docs/screenshots/02-terminal-sftp.png" alt="终端 + SFTP + 资源监控" width="800"><br>
+  <em>多标签页终端 + 左侧远端资源监控 + 底部 SFTP 文件浏览</em>
 </p>
 
 ## 下载与安装
 
 每次打 `v*` 标签，GitHub Actions 会自动构建 **Windows / Linux / macOS** 三平台二进制，
-发布到 [Releases](https://github.com/yituorou/meatshell/releases) 页面。
+发布到本仓库的 [Releases](../../releases) 页面。
 
 ### Windows
 
@@ -87,10 +91,13 @@ open /Applications/meatshell.app
 - [x] 远端进程监控（按 CPU 排序、PID 复制与权限确认后结束进程）
 - [x] 完整 VT/ANSI 终端模拟（btop / htop / vim 全屏正常渲染）
 - [x] 彩色 emoji（支持肤色、旗帜及 ZWJ 组合序列）
+- [x] 终端语法高亮（移植 WindTerm 的 Linux lexer）：命令、选项、字符串、IP / MAC、时间、数字和错误 / 成功等关键字按终端配色着色，深色与浅色主题各一套颜色
+- [x] 常驻左侧导航栏（会话 / 资源 / 快捷命令），三个面板共用同一宽度并记住上次调整的大小
+- [x] 底部文件 / 命令 / 隧道面板固定停靠在窗口底部，可折叠，收起后不占用空间
 - [x] 多标签页（欢迎页 + 多个会话）
 - [x] 会话管理：新建 / 编辑 / 删除 / 分组，本地 JSON 持久化，导出 / 导入（兼容 FinalShell 连接文件）
-  - 配置位置：`%APPDATA%/meatshell/sessions.json`（Windows）
-    / `~/.config/meatshell/sessions.json`（Linux）
+  - 配置位置（便携优先）：可执行文件同目录的 `config/sessions.json`；该目录不可写时回退到
+    `%APPDATA%/meatshell/sessions.json`（Windows）/ `~/.config/meatshell/sessions.json`（Linux）
     / `~/Library/Application Support/meatshell/sessions.json`（macOS）
 - [x] SSH（`russh`，纯 Rust）：密码 / 私钥 / 加密私钥（密码短语）
 - [x] SFTP 文件浏览 + 上传 / 下载（拖拽）+ 双栏（本地 / 远程）互传（可拖拽）+ 终端内 ZMODEM（`sz` 下载 / `rz` 多文件上传）
@@ -133,8 +140,12 @@ open /Applications/meatshell.app
 cargo run --release
 ```
 
-首次启动会在 `%APPDATA%/meatshell/sessions.json` 建立空的会话库。点击右上
-角 **“＋ 新建会话”** 添加第一台服务器。
+首次启动会在可执行文件同目录的 `config/sessions.json` 建立空的会话库（该目录不可写时
+改用上文的用户配置目录）。点击右上角 **“＋ 新建会话”** 添加第一台服务器。
+
+> 首次以便携方式启动时，如果旧版用户配置目录仍然存在，程序会把其中的会话、密钥和
+> `known_hosts` 复制过来，方便从旧安装升级。想从全新默认状态开始，请先移除旧目录
+> （`%APPDATA%/meatshell`、`~/.config/meatshell` 等）再启动。
 
 ## CLI 与 MCP 自动化
 

@@ -15,7 +15,26 @@ fn color((r, g, b): Rgb) -> slint::Color {
 /// and the Theme's terminal colours.
 fn resolve(dark: bool, id: &str) -> (Option<SchemeColors>, TermColors) {
     match scheme::lookup(id) {
-        Some(c) => {
+        Some(mut c) => {
+            if scheme::is_highlight_only(id) {
+                // WindTerm only supplies the ANSI palette. Keep the theme's
+                // background, text, cursor and accent-tinted selection: with
+                // `custom: false` the UI reads them from the colour theme, so
+                // wallpaper translucency still works.
+                let d = scheme::default_colors(dark);
+                c.bg = d.bg;
+                c.fg = d.fg;
+                c.cursor = d.cursor;
+                c.selection = d.selection;
+                let theme = TermColors {
+                    custom: false,
+                    bg: color(d.bg),
+                    fg: color(d.fg),
+                    cursor: color(d.cursor),
+                    selection: color(d.selection),
+                };
+                return (Some(c), theme);
+            }
             let theme = TermColors {
                 custom: true,
                 bg: color(c.bg),
@@ -39,11 +58,14 @@ fn resolve(dark: bool, id: &str) -> (Option<SchemeColors>, TermColors) {
     }
 }
 
-/// The saved id, or "default" when it no longer resolves (deleted import).
+/// The saved id; an unset one means the first-run scheme (WindTerm), and
+/// "default" when a saved id no longer resolves (deleted import).
 fn current_id(store: &ConfigStore, dark: bool) -> String {
     let id = store.terminal_scheme(dark);
     if scheme::lookup(id).is_some() {
         id.to_string()
+    } else if id.is_empty() {
+        scheme::first_run_id(dark).to_string()
     } else {
         scheme::DEFAULT_ID.to_string()
     }
@@ -61,7 +83,14 @@ fn item(s: &TermScheme) -> TermSchemeItem {
             }
             .to_string(),
         ),
-        SchemeSource::Builtin => (s.name.clone(), "iTerm2-Color-Schemes".to_string()),
+        SchemeSource::Builtin => (
+            s.name.clone(),
+            if scheme::is_first_run(&s.id) {
+                "WindTerm 2.7".to_string()
+            } else {
+                "iTerm2-Color-Schemes".to_string()
+            },
+        ),
         SchemeSource::Imported => (
             s.name.clone(),
             if en {
@@ -155,6 +184,12 @@ pub(super) fn apply_terminal_schemes(window: &AppWindow, store: &ConfigStore) {
     let (dark, dark_theme) = resolve(true, &dark_id);
     let (light, light_theme) = resolve(false, &light_id);
     scheme::set_active(dark, light);
+    // The WindTerm schemes also turn on the output highlighting their lexer
+    // describes; every other scheme keeps the plain log-level pass (#m07146).
+    scheme::set_syntax(
+        scheme::is_highlight_only(&dark_id),
+        scheme::is_highlight_only(&light_id),
+    );
     window.set_term_colors_dark(dark_theme);
     window.set_term_colors_light(light_theme);
     window.set_term_scheme_dark_id(dark_id.into());
@@ -193,11 +228,9 @@ pub(super) fn wire(ctx: &WinCtx) {
         let (store, bufs, registry) = (store.clone(), bufs.clone(), registry.clone());
         window.on_set_term_scheme(move |dark_slot, id: SharedString| {
             let Some(w) = weak.upgrade() else { return };
-            let id = if id.as_str() == scheme::DEFAULT_ID {
-                ""
-            } else {
-                id.as_str()
-            };
+            // "" means "never picked" (first-run scheme), so an explicit
+            // Default is stored as the literal id.
+            let id = id.as_str();
             store.borrow_mut().set_terminal_scheme(dark_slot, id);
             w.set_term_scheme_status("".into());
             commit(&w, &store, &bufs, &registry);
@@ -292,6 +325,32 @@ mod tests {
                 .rposition(|s| s.source != SchemeSource::Default && s.dark == dark_slot);
             assert!(last_same.unwrap() < first_other.unwrap());
         }
+    }
+
+    /// WindTerm changes only the ANSI palette: the render path still gets the
+    /// theme's background / text / cursor and the accent selection (`custom:false`),
+    /// while the terminal paints 0–15 from WindTerm.
+    #[test]
+    fn highlight_only_scheme_keeps_the_theme_colours() {
+        for dark in [true, false] {
+            let id = scheme::first_run_id(dark);
+            let (colors, theme) = resolve(dark, id);
+            let colors = colors.expect("WindTerm resolves for both modes");
+            let base = scheme::default_colors(dark);
+            assert_eq!(colors.bg, base.bg, "{id} bg");
+            assert_eq!(colors.fg, base.fg, "{id} fg");
+            assert_eq!(colors.cursor, base.cursor, "{id} cursor");
+            assert_eq!(colors.selection, base.selection, "{id} selection");
+            assert!(!theme.custom, "{id} must not override the theme");
+            assert_eq!(theme.bg, color(base.bg), "{id} theme bg");
+            assert_eq!(theme.fg, color(base.fg), "{id} theme fg");
+            assert_ne!(colors.ansi, base.ansi, "{id} keeps WindTerm's palette");
+        }
+
+        // A normal scheme still overrides the theme, as before.
+        let (colors, theme) = resolve(true, "dracula");
+        assert!(colors.is_some());
+        assert!(theme.custom);
     }
 
     /// Renders Settings › Terminal colours under a few schemes into

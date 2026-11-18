@@ -54,6 +54,33 @@ pub(crate) struct TermScheme {
 }
 
 pub(crate) const DEFAULT_ID: &str = "default";
+/// Scheme used until the user picks one (WindTerm's dark highlight set).
+pub(crate) const FIRST_RUN_ID: &str = "windterm";
+/// WindTerm's light highlight set, used by the light-mode slot.
+pub(crate) const FIRST_RUN_LIGHT_ID: &str = "windterm-light";
+/// The WindTerm built-ins only contribute their ANSI palette: background,
+/// default text, cursor and selection stay with the colour theme, so wallpaper
+/// translucency and the accent selection keep working (#highlight-only).
+const HIGHLIGHT_ONLY: &[&str] = &[FIRST_RUN_ID, FIRST_RUN_LIGHT_ID];
+
+/// The first-run scheme for a mode: dige-black when dark, dige-white otherwise.
+pub(crate) fn first_run_id(dark: bool) -> &'static str {
+    if dark {
+        FIRST_RUN_ID
+    } else {
+        FIRST_RUN_LIGHT_ID
+    }
+}
+
+/// Either WindTerm entry counts as the first-run scheme.
+pub(crate) fn is_first_run(id: &str) -> bool {
+    id == FIRST_RUN_ID || id == FIRST_RUN_LIGHT_ID
+}
+
+/// Schemes that only replace the ANSI palette (see `HIGHLIGHT_ONLY`).
+pub(crate) fn is_highlight_only(id: &str) -> bool {
+    HIGHLIGHT_ONLY.contains(&id)
+}
 /// Ids of imported schemes are this prefix plus the file stem.
 pub(crate) const USER_PREFIX: &str = "user:";
 const FILE_EXT: &str = "itermcolors";
@@ -113,6 +140,31 @@ impl Builtin {
 // https://github.com/mbadolato/iTerm2-Color-Schemes). Dark schemes first.
 //          id, name, dark, [bg, fg, cursor, selection], [ansi 0..15]
 const BUILTINS: &[Builtin] = &[
+    // Extracted from WindTerm 2.7.0's "dige-black" theme
+    // (`global/themes/dige-black/scheme.theme`: terminal.ansi* + text.default).
+    // Only the ANSI palette is applied; the base mirrors MeatShell's own dark
+    // colours so the list row and preview stay honest (#highlight-only).
+    builtin(
+        "windterm",
+        "WindTerm",
+        true,
+        [0x0e0f13, 0xd4d4d4, 0xd4d4d4, 0x4a90e2],
+        [
+            0x333333, 0xc4265e, 0x86b42b, 0xd0a500, 0x3465a4, 0x8c6bc8, 0x56adbc, 0xe3e3dd,
+            0x666666, 0xf92672, 0xa6e22e, 0x9e862f, 0x819aff, 0xae81ff, 0x66d9ef, 0xf8f8f2,
+        ],
+    ),
+    // WindTerm 2.7.0's "dige-white" theme, same rule: ANSI palette only.
+    builtin(
+        "windterm-light",
+        "WindTerm Light",
+        false,
+        [0xfafafa, 0x2d2d2f, 0x2d2d2f, 0x0071e3],
+        [
+            0x272822, 0xdc322f, 0x32cd32, 0xffd700, 0x3465a4, 0xd33682, 0x3a96dd, 0xd3d3d3,
+            0x333333, 0xff7882, 0x3cb371, 0xd2691e, 0x80baff, 0xd778ff, 0x78ffff, 0x708090,
+        ],
+    ),
     builtin(
         "dracula",
         "Dracula",
@@ -706,6 +758,21 @@ thread_local! {
         const { RefCell::new((0, [None, None])) };
 }
 
+/// Whether output syntax highlighting is on for dark / light mode (set when
+/// a WindTerm scheme is active; see `terminal_scheme::apply`).
+static SYNTAX: [std::sync::atomic::AtomicBool; 2] =
+    [std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false)];
+
+/// Turn the WindTerm-style output highlighting on or off per mode.
+pub(crate) fn set_syntax(dark: bool, light: bool) {
+    SYNTAX[0].store(dark, Ordering::Relaxed);
+    SYNTAX[1].store(light, Ordering::Relaxed);
+}
+
+pub(crate) fn syntax_enabled(is_dark: bool) -> bool {
+    SYNTAX[usize::from(!is_dark)].load(Ordering::Relaxed)
+}
+
 /// Set the schemes used in dark and light mode (`None` = default colours).
 /// Open terminals pick them up on their next render.
 pub(crate) fn set_active(dark: Option<SchemeColors>, light: Option<SchemeColors>) {
@@ -818,6 +885,44 @@ mod tests {
             let sel = readable_selection(&c);
             assert!(contrast(sel, c.fg) >= 3.0, "{} selection", b.id);
         }
+    }
+
+    /// The first-run schemes are WindTerm 2.7's palettes: `dige-black` for
+    /// dark mode and `dige-white` for light mode (`global/themes/*/scheme.theme`).
+    /// Only their ANSI colours are used; the base follows MeatShell's theme.
+    #[test]
+    fn windterm_is_first_run_with_a_palette_per_mode() {
+        assert_eq!(first_run_id(true), "windterm");
+        assert_eq!(first_run_id(false), "windterm-light");
+        assert!(is_first_run("windterm"));
+        assert!(is_first_run("windterm-light"));
+        assert!(!is_first_run("dracula"));
+        assert!(is_highlight_only("windterm"));
+        assert!(is_highlight_only("windterm-light"));
+        assert!(!is_highlight_only("dracula"));
+
+        let rows = all_in(Path::new("no-such-scheme-dir"), true);
+        let dark = rows
+            .iter()
+            .find(|s| s.id == FIRST_RUN_ID)
+            .expect("WindTerm is in the list");
+        assert_eq!(dark.name, "WindTerm");
+        assert!(dark.dark);
+        assert_eq!(dark.colors.bg, (0x0e, 0x0f, 0x13));
+        assert_eq!(dark.colors.fg, (0xd4, 0xd4, 0xd4));
+        assert_eq!(dark.colors.ansi[1], (0xc4, 0x26, 0x5e));
+        assert_eq!(dark.colors.ansi[10], (0xa6, 0xe2, 0x2e));
+
+        let light = rows
+            .iter()
+            .find(|s| s.id == FIRST_RUN_LIGHT_ID)
+            .expect("WindTerm Light is in the list");
+        assert_eq!(light.name, "WindTerm Light");
+        assert!(!light.dark);
+        assert_eq!(light.colors.bg, (0xfa, 0xfa, 0xfa));
+        assert_eq!(light.colors.ansi[2], (0x32, 0xcd, 0x32));
+        assert_eq!(light.colors.ansi[8], (0x33, 0x33, 0x33));
+        assert_eq!(light.colors.ansi[15], (0x70, 0x80, 0x90));
     }
 
     #[test]

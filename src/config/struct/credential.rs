@@ -8,6 +8,11 @@ use super::{AuthMethod, Secret, Session, SessionKind};
 /// credential instead of each keeping its own copy. Changing the password here
 /// changes it for every session that uses it.
 ///
+/// The username is the exception: a session may keep its own username (many
+/// hosts share one key but log in as different users), and that name wins over
+/// the credential's. Only sessions that leave the username blank follow the
+/// credential here.
+///
 /// Secrets are encrypted at rest exactly like session secrets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credential {
@@ -40,6 +45,8 @@ impl Credential {
     }
 
     /// Copy this login into `session`: username, method and secrets.
+    /// Callers that allow a per-session username should use
+    /// [`apply_linked_credential`], which keeps a non-empty `session.user`.
     pub fn apply_to(&self, session: &mut Session) {
         session.user = self.user.clone();
         session.auth = self.auth;
@@ -69,6 +76,10 @@ impl Credential {
 /// Fill a linked session's login from its credential. Only SSH sessions can be
 /// linked; a link on another kind, or to a credential that no longer exists,
 /// is dropped and the session keeps the login it already holds.
+///
+/// A session that carries its own username keeps it: one saved key can serve
+/// hosts that expect different users. Auth method, password and key always come
+/// from the credential.
 pub(crate) fn apply_linked_credential(credentials: &[Credential], session: &mut Session) {
     if session.credential_id.is_empty() {
         return;
@@ -78,7 +89,14 @@ pub(crate) fn apply_linked_credential(credentials: &[Credential], session: &mut 
         return;
     }
     match credentials.iter().find(|c| c.id == session.credential_id) {
-        Some(credential) => credential.apply_to(session),
+        Some(credential) => {
+            // The session's own username wins; blank means "follow".
+            let own_user = session.user.trim().to_string();
+            credential.apply_to(session);
+            if !own_user.is_empty() {
+                session.user = own_user;
+            }
+        }
         None => session.credential_id.clear(),
     }
 }
@@ -102,7 +120,7 @@ mod tests {
     fn linked_ssh_session_takes_the_credential_login() {
         let cred = credential();
         let mut session = Session::new_empty();
-        session.user = "root".into();
+        session.user.clear();
         session.password = Secret::new("old");
         session.credential_id = cred.id.clone();
         apply_linked_credential(std::slice::from_ref(&cred), &mut session);
@@ -111,6 +129,28 @@ mod tests {
         assert_eq!(session.password.as_str(), "passphrase");
         assert_eq!(session.private_key_path, "/home/me/.ssh/id_ed25519");
         assert_eq!(session.credential_id, cred.id);
+    }
+
+    /// One saved key, different login names: the session's own username
+    /// survives the link while the key/passphrase still come from it.
+    #[test]
+    fn own_username_wins_over_the_credential() {
+        let cred = credential();
+        let mut session = Session::new_empty();
+        session.user = "root".into();
+        session.credential_id = cred.id.clone();
+        apply_linked_credential(std::slice::from_ref(&cred), &mut session);
+        assert_eq!(session.user, "root");
+        assert_eq!(session.auth, AuthMethod::Key);
+        assert_eq!(session.password.as_str(), "passphrase");
+        assert_eq!(session.private_key_path, "/home/me/.ssh/id_ed25519");
+
+        // A whitespace-only name counts as blank and follows the credential.
+        let mut blank = Session::new_empty();
+        blank.user = "  ".into();
+        blank.credential_id = cred.id.clone();
+        apply_linked_credential(std::slice::from_ref(&cred), &mut blank);
+        assert_eq!(blank.user, "deploy");
     }
 
     #[test]
