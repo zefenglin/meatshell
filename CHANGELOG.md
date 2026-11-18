@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.15] - 2026-11-18
+
+- **按住 Shift+Alt 单击，直接从光标拉出一个矩形。** 以前只有拖动才能拉出矩形，单击只会得到一个零宽的列光标，所以「光标放在左上角、Shift+Alt 点一下右下角」什么也没有。现在和 Notepad++ 一样：先用普通单击把光标放到起点（这一步由文本框自己精确命中），再按住 Shift+Alt 在终点单击，矩形就从光标一直覆盖到点击处；之后每按一次 Shift+Alt 单击都可以再改另一端，起点不用重新点。判断规则是：按下后移动超过 4px 才算拖动，矩形以按下点为起点；没移动就松开则算单击，矩形以光标为起点。
+- **Holding Shift+Alt and clicking now drags a block out of the caret.** A click used to give only a zero-width column caret, so "put the caret at the top left, then Shift+Alt-click the bottom right" produced nothing. It follows Notepad++ now: place the caret at one corner with an ordinary click (the text input hits exactly the glyph you aimed at), then hold Shift+Alt and click the other corner — the block spans from the caret to where you clicked, and every further Shift+Alt click moves that other corner without pressing the start again. A press that moves more than 4px counts as a drag anchored at the press point; one that is released where it went down counts as a click anchored at the caret.
+
 ## [0.8.14] - 2026-11-18
 
 - **松开 Shift+Alt 之后，矩形框仍然赖在那里。** 对齐 Notepad++ 的列模式：只要光标因为别的原因移动了（在别处点一下、拖选、按方向键），列模式立刻结束，矩形随之消失，光标就落在你点的位置。另外修掉了两个会让它「偶尔不退出」的问题：判断「刚点了一下」用的是所有命令输入框共享的一个边沿标记，谁先读到就被谁消费掉，其它输入框永远收不到；而快于 40 ms 的一次点击整个落在两次轮询之间，同样收不到。现在改为读「左键此刻是否按着」，既不共享也不会漏。列模式内的复制、松手即复制、增删矩形范围都保持不变。

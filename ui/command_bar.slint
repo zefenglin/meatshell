@@ -52,12 +52,18 @@ export component CommandEditor inherits Rectangle {
     // corner.
     property <int> drag-line: 0;
     property <int> drag-col: 0;
-    // Where the last click landed. A Shift+Alt move (or a second Shift+Alt
-    // press) turns that plain click into the fixed corner of a rectangle, so a
-    // block can be started at the very front of one line and finished at the
-    // end of another.
-    property <int> click-line: -1;
-    property <int> click-col: -1;
+    // The fixed corner of a mouse rectangle (0-based line and character
+    // column). The moving corner follows the pointer, so the block can be grown
+    // again later without pressing its start a second time.
+    property <int> rect-anchor-line: -1;
+    property <int> rect-anchor-col: -1;
+    // A Shift+Alt press with no block yet. It anchors at the press if the
+    // pointer moves (a drag), and at the caret if it is released where it went
+    // down (a click), which is how Notepad++ starts a column block from the
+    // caret.
+    property <bool> rect-pending: false;
+    property <length> rect-press-x: 0px;
+    property <length> rect-press-y: 0px;
     // Modifier state as seen by the last key event. A rectangle needs both
     // Shift and Alt held: a plain drag selects text the way the widget does.
     property <bool> mod-shift: false;
@@ -121,6 +127,10 @@ export component CommandEditor inherits Rectangle {
         // its caret column, and a zero-width block is what draws one caret per
         // line, so the next keystroke still reaches every line of the block.
         if (result.anchor-line >= 0) {
+            // Re-anchor on the caret corner: an edit collapses the block, so
+            // growing it later must start from where the caret now is.
+            root.rect-anchor-line = result.anchor-line;
+            root.rect-anchor-col = result.column;
             root.sel-start-col = result.column;
             root.sel-end-col = max(result.column, result.column-end);
         } else {
@@ -143,8 +153,9 @@ export component CommandEditor inherits Rectangle {
         root.column-anchor = -1;
         root.sel-start-col = -1;
         root.sel-end-col = -1;
-        root.click-line = -1;
-        root.click-col = -1;
+        root.rect-anchor-line = -1;
+        root.rect-anchor-col = -1;
+        root.rect-pending = false;
     }
 
     // Copy the block as it stands. A zero-width block is a caret on every line
@@ -166,6 +177,14 @@ export component CommandEditor inherits Rectangle {
             return;
         }
         root.rect-dragging = false;
+        if (root.rect-pending) {
+            root.rect-pending = false;
+            // Released without moving: the caret is the fixed corner, so the
+            // block spans from it to where the click landed.
+            let spot = root.locate();
+            root.begin-rect(spot.caret-line, spot.column,
+                root.rect-press-x, root.rect-press-y);
+        }
         root.copy-rect();
     }
 
@@ -175,6 +194,13 @@ export component CommandEditor inherits Rectangle {
     function byte-at(line: int, col: int) -> int {
         return root.step(edit-input.text, edit-input.cursor-position-byte-offset,
             line, col, col, 11, "").caret;
+    }
+
+    // Ask Rust where the caret itself is, as (line, column): a Shift+Alt click
+    // with no block starts its rectangle there.
+    function locate() -> CommandEditResult {
+        return root.step(edit-input.text, edit-input.cursor-position-byte-offset,
+            0, 0, 0, 12, "");
     }
 
     // Ask Rust where a (line, column) pair lives: the answer carries the
@@ -206,8 +232,6 @@ export component CommandEditor inherits Rectangle {
         root.text-lines = max(1, spot.lines);
         root.drag-line = spot.caret-line;
         root.drag-col = root.col-at(x);
-        root.click-line = root.drag-line;
-        root.click-col = root.drag-col;
         root.column-anchor = -1;
         root.column-index = root.drag-col;
         root.sel-start-col = -1;
@@ -224,43 +248,34 @@ export component CommandEditor inherits Rectangle {
             root.byte-at(root.drag-line, root.drag-col), spot.caret);
     }
 
-    // Shift+Alt drag: a character rectangle. A press without any horizontal
-    // movement is a zero-width block instead, i.e. a caret on every line at
-    // that column, which is how typing inserts before a character.
-    function begin-rect(x: length, y: length) {
+    // Start a character rectangle from a fixed corner (line + column). The
+    // moving corner is wherever the pointer is.
+    function begin-rect(anchor-line: int, anchor-col: int, x: length, y: length) {
         edit-input.focus();
-        let spot = root.place(root.line-at(y), root.col-at(x));
-        root.text-lines = max(1, spot.lines);
-        root.drag-line = spot.caret-line;
-        root.drag-col = root.col-at(x);
-        root.click-line = root.drag-line;
-        root.click-col = root.drag-col;
-        root.sel-start-col = root.drag-col;
-        root.sel-end-col = root.drag-col;
-        root.column-anchor = root.drag-line;
-        root.column-caret-line = root.drag-line;
-        root.column-index = root.drag-col;
-        root.expected-caret = spot.caret;
-        edit-input.set-selection-offsets(spot.caret, spot.caret);
+        root.rect-anchor-line = max(0, anchor-line);
+        root.rect-anchor-col = max(0, anchor-col);
+        root.extend-rect(x, y);
     }
 
-    // Move the moving corner of the block: the corner pressed first
-    // (click-line/click-col) stays put, so a rectangle can be grown again with
-    // another Shift+Alt press instead of starting over from a new point.
+    // Move the moving corner of the block; the fixed corner stays where it is,
+    // so a rectangle can be grown with another Shift+Alt press instead of
+    // starting over from a new point. No horizontal movement makes a zero-width
+    // block, i.e. a caret on every line at that column.
     function extend-rect(x: length, y: length) {
         let spot = root.place(root.line-at(y), root.col-at(x));
         root.text-lines = max(1, spot.lines);
-        let line = spot.caret-line;
         let col = root.col-at(x);
-        if (col == root.click-col) {
-            root.sel-start-col = root.click-col;
-            root.sel-end-col = root.click-col;
+        if (col == root.rect-anchor-col) {
+            root.sel-start-col = root.rect-anchor-col;
+            root.sel-end-col = root.rect-anchor-col;
         } else {
-            root.sel-start-col = min(root.click-col, col);
-            root.sel-end-col = max(root.click-col, col) + 1;
+            root.sel-start-col = min(root.rect-anchor-col, col);
+            root.sel-end-col = max(root.rect-anchor-col, col) + 1;
         }
-        root.column-anchor = root.click-line;
-        root.column-caret-line = line;
+        root.column-anchor = root.rect-anchor-line;
+        root.column-caret-line = spot.caret-line;
+        // The badge counts from the left edge, which is not always the anchor
+        // corner: a block dragged right-to-left grows to the left.
         root.column-index = root.sel-start-col;
         root.expected-caret = spot.caret;
         edit-input.set-selection-offsets(spot.caret, spot.caret);
@@ -619,14 +634,22 @@ export component CommandEditor inherits Rectangle {
                         if (root.rect-mode > 0
                             || (root.rect-mode < 0 && root.mod-shift && root.mod-alt)) {
                             root.rect-dragging = true;
-                            if (root.column-anchor >= 0
-                                && root.sel-end-col > root.sel-start-col) {
-                                // A block is already there: keep its far
-                                // corner and move the near one, so growing or
+                            if (root.column-anchor >= 0) {
+                                // A block is already there: keep its fixed
+                                // corner and move the moving one, so growing or
                                 // shrinking it does not need the start again.
+                                if (root.rect-anchor-line < 0) {
+                                    root.rect-anchor-line = root.column-anchor;
+                                    root.rect-anchor-col = max(0, root.column-index);
+                                }
                                 root.extend-rect(self.mouse-x, self.mouse-y);
                             } else {
-                                root.begin-rect(self.mouse-x, self.mouse-y);
+                                // Nothing yet: a drag anchors at the press, a
+                                // click anchors at the caret. Which one it is
+                                // only becomes known on move or release.
+                                root.rect-pending = true;
+                                root.rect-press-x = self.mouse-x;
+                                root.rect-press-y = self.mouse-y;
                             }
                         } else {
                             root.begin-caret(self.mouse-x, self.mouse-y);
@@ -639,7 +662,20 @@ export component CommandEditor inherits Rectangle {
                 moved => {
                     if (self.pressed) {
                         if (root.rect-dragging) {
-                            root.extend-rect(self.mouse-x, self.mouse-y);
+                            if (root.rect-pending) {
+                                // 4px of slack so a click with a shaky hand is
+                                // still a click, not a one-pixel block.
+                                let dx = self.mouse-x - root.rect-press-x;
+                                let dy = self.mouse-y - root.rect-press-y;
+                                if (dx > 4px || dx < -4px || dy > 4px || dy < -4px) {
+                                    root.rect-pending = false;
+                                    root.begin-rect(root.line-at(root.rect-press-y),
+                                        root.col-at(root.rect-press-x),
+                                        self.mouse-x, self.mouse-y);
+                                }
+                            } else {
+                                root.extend-rect(self.mouse-x, self.mouse-y);
+                            }
                         } else {
                             root.extend-caret(self.mouse-x, self.mouse-y);
                         }

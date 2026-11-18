@@ -36,6 +36,11 @@ pub const OP_NEWLINE: i32 = 10;
 /// the caret on a click and to drag a rectangle. The text is not touched.
 pub const OP_PLACE: i32 = 11;
 
+/// The inverse of `OP_PLACE`: report the caret's own (line, column) instead of
+/// moving it. A Shift+Alt click starts its rectangle at the caret, so the mouse
+/// needs to know where that is before it takes the caret over.
+pub const OP_LOCATE: i32 = 12;
+
 /// Column mode is off; the caret/anchor pair is carried through unchanged.
 pub const NO_ANCHOR: i32 = -1;
 
@@ -429,6 +434,11 @@ pub fn apply_rect(
         (a.min(b), a.max(b))
     };
 
+    // The mouse asks where the caret itself is, so a chord click can start a
+    // rectangle from it.
+    if op == OP_LOCATE {
+        return EditResult::idle(text, caret.min(text.len()));
+    }
     // The mouse asks where a (line, column) pair lives in byte offsets before
     // it moves the caret itself.
     if op == OP_PLACE {
@@ -820,6 +830,29 @@ mod tests {
         assert_eq!(result.caret_line, 2);
         assert_eq!(result.column, 2);
         assert_eq!(result.anchor_line, NO_ANCHOR);
+    }
+
+    #[test]
+    fn locate_reports_the_caret_without_touching_the_text() {
+        let text = "ab
+cd
+ef";
+        let caret = caret_of(text, 1, 1);
+        let result = apply_rect(text, caret, 0, 0, 0, OP_LOCATE, "");
+        assert_eq!(result.text, text);
+        assert_eq!(result.caret, caret);
+        assert_eq!(result.caret_line, 1);
+        assert_eq!(result.column, 1);
+        assert_eq!(result.anchor_line, NO_ANCHOR);
+    }
+
+    #[test]
+    fn locate_clamps_a_caret_past_the_end() {
+        let text = "ab";
+        let result = apply_rect(text, 99, 0, 0, 0, OP_LOCATE, "");
+        assert_eq!(result.caret, 2);
+        assert_eq!(result.caret_line, 0);
+        assert_eq!(result.column, 2);
     }
 
     #[test]
