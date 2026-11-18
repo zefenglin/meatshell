@@ -42,6 +42,10 @@ pub(super) fn apply_window_chrome(window: &slint::Window) {
         // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2 (Windows 11+).
         const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
         const DWMWCP_ROUND: u32 = 2;
+        // DWMWA_BORDER_COLOR = 34; DWMWA_COLOR_NONE = 0xFFFFFFFE hides the 1 px
+        // system outline DWM draws around a frameless window once it is restored.
+        const DWMWA_BORDER_COLOR: u32 = 34;
+        const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
         unsafe {
             let pref: u32 = DWMWCP_ROUND;
             let corner_hr = DwmSetWindowAttribute(
@@ -50,7 +54,16 @@ pub(super) fn apply_window_chrome(window: &slint::Window) {
                 &pref as *const u32 as isize,
                 4,
             );
-            tracing::debug!("window chrome applied: hwnd={hwnd:#x} corner_hr={corner_hr:#x}");
+            let border: u32 = DWMWA_COLOR_NONE;
+            let border_hr = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &border as *const u32 as isize,
+                4,
+            );
+            tracing::debug!(
+                "window chrome applied: hwnd={hwnd:#x} corner_hr={corner_hr:#x} border_hr={border_hr:#x}"
+            );
         }
     });
 }
@@ -117,6 +130,12 @@ pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> 
             cy: i32,
             flags: u32,
         ) -> i32;
+        fn RedrawWindow(
+            hwnd: isize,
+            rect: *const std::ffi::c_void,
+            region: *const std::ffi::c_void,
+            flags: u32,
+        ) -> i32;
     }
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
@@ -124,6 +143,10 @@ pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> 
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_FRAMECHANGED: u32 = 0x0020;
     const SWP_NOOWNERZORDER: u32 = 0x0200;
+    const RDW_INVALIDATE: u32 = 0x0001;
+    const RDW_FRAME: u32 = 0x0010;
+    const RDW_ALLCHILDREN: u32 = 0x0080;
+    const RDW_UPDATENOW: u32 = 0x0100;
 
     let measured = window.with_winit_window(|ww| {
         let handle = ww.window_handle().ok()?;
@@ -178,13 +201,14 @@ pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> 
             );
             let scale = ww.scale_factor().max(0.01) as f64;
             Some((
+                hwnd,
                 slint::LogicalSize::new(client_w as f32 / scale as f32, client_h as f32 / scale as f32),
                 dx,
                 dy,
             ))
         }
     });
-    let Some(Some((logical, dx, dy))) = measured else {
+    let Some(Some((hwnd, logical, dx, dy))) = measured else {
         return false;
     };
     tracing::debug!(
@@ -197,6 +221,16 @@ pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> 
     );
     window.dispatch_event(slint::platform::WindowEvent::Resized { size: logical });
     window.request_redraw();
+    // Make sure DWM picks the new frame up right away instead of waiting for
+    // the next paint of an unrelated element.
+    unsafe {
+        RedrawWindow(
+            hwnd,
+            std::ptr::null(),
+            std::ptr::null(),
+            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+    }
     // `SWP_FRAMECHANGED` can drop the Win11 rounded-corner hint.
     apply_window_chrome(window);
     true
@@ -205,6 +239,51 @@ pub(super) fn realign_frameless_surface(window: &slint::Window, force: bool) -> 
 #[cfg(not(windows))]
 pub(super) fn realign_frameless_surface(_window: &slint::Window, _force: bool) -> bool {
     false
+}
+
+/// Whether the primary mouse button is currently held down.
+#[cfg(windows)]
+pub(super) fn primary_button_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(key: i32) -> i16;
+    }
+    const VK_LBUTTON: i32 = 0x01;
+    unsafe { (GetAsyncKeyState(VK_LBUTTON) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(not(windows))]
+pub(super) fn primary_button_down() -> bool {
+    false
+}
+
+/// Re-align after a drag restored a maximized window, but only once the drag is
+/// over. Dragging a maximized window restores it at the *start* of the drag and
+/// the move loop keeps pumping timers, so a re-align fired during the drag gets
+/// undone by the OS when the drag ends — the faster the drag, the more of the
+/// stale frame is left behind (unpainted strip along the top/left edge).
+pub(super) fn schedule_restore_realign(weak: slint::Weak<AppWindow>, attempt: u32) {
+    // ~7 s of drag at 120 ms per attempt; a drag cannot outlast that.
+    if attempt > 60 {
+        return;
+    }
+    slint::Timer::single_shot(std::time::Duration::from_millis(120), move || {
+        if primary_button_down() {
+            schedule_restore_realign(weak, attempt + 1);
+            return;
+        }
+        let Some(win) = weak.upgrade() else {
+            return;
+        };
+        realign_frameless_surface(&win.window(), true);
+        // The OS settles the frame one more time after the release; repeat once.
+        let again = win.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_millis(200), move || {
+            if let Some(win) = again.upgrade() {
+                realign_frameless_surface(&win.window(), true);
+            }
+        });
+    });
 }
 
 #[cfg(windows)]
@@ -709,17 +788,9 @@ pub(super) fn wire_window_controls(
                 if let Some(m) = now {
                     w.set_window_maximized(m);
                     if !m {
-                        // The OS restores the frame asynchronously; re-align the
-                        // render surface once it has settled (white-edge fix).
-                        let weak = w.as_weak();
-                        slint::Timer::single_shot(
-                            std::time::Duration::from_millis(60),
-                            move || {
-                                if let Some(w) = weak.upgrade() {
-                                    realign_frameless_surface(&w.window(), false);
-                                }
-                            },
-                        );
+                        // The OS finishes restoring the frame after the click, so
+                        // defer the re-align until the window has settled.
+                        schedule_restore_realign(w.as_weak(), 0);
                     }
                 }
             }

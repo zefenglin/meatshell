@@ -329,17 +329,7 @@ pub(super) fn install_window_event_hook(
                                 // client offset until it is explicitly re-aligned;
                                 // otherwise a 7 px strip along the window edge is
                                 // never painted (white when a window is behind it).
-                                for delay in [0u64, 60] {
-                                    let weak = win.as_weak();
-                                    slint::Timer::single_shot(
-                                        std::time::Duration::from_millis(delay),
-                                        move || {
-                                            if let Some(win) = weak.upgrade() {
-                                                realign_frameless_surface(&win.window(), true);
-                                            }
-                                        },
-                                    );
-                                }
+                                schedule_restore_realign(win.as_weak(), 0);
                             }
                             // The OS can leave fullscreen on its own (macOS
                             // green button / gesture): drop the chromeless

@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-11-18
+
+- **进一步修复最大化还原后的白边。** 拖动还原时系统在拖动过程中还会重新计算一次边框，之前那次重绘会被覆盖，拖动越快残留越明显。现在等到鼠标松开、窗口定下来之后再重绘（并补一次 DWM 边框刷新），同时隐藏系统给无边框窗口画的 1px 描边。
+- **Further fix for the white edge after restoring a maximized window.** The OS derives the frame once more while the drag is still running, which overwrote the earlier repaint — the faster the drag, the more was left behind. The repaint now waits until the mouse is released and the window has settled (plus one DWM frame refresh), and the 1 px system outline drawn around a frameless window is hidden.
+
 ## [0.8.5] - 2026-11-18
 
 - **修复最大化后拖动标题栏还原时的白边。** 无边框窗口从最大化还原后，系统可能仍按最大化时的内边距绘制，窗口边缘会留下一条没画到的竖条（后面是别的窗口时显示为白边）。现在在还原的瞬间重新计算窗口边框，并把真实的客户区尺寸交回渲染层，边缘立即重绘。
